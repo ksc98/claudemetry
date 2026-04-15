@@ -274,6 +274,11 @@ curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/recent
 curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/search \
   -d '{"q":"parse_sse_usage","mode":"hybrid","limit":20}'
 
+# Full record for one transaction — all columns including the untruncated
+# user_text + assistant_text. Backs `burnage turn <tx_id>`.
+curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/turn \
+  -d '{"tx_id":"inflight-1776251872077-c68abdc2"}'
+
 # Generic SQL exec — backs `burnage shell`. Optional `hash` overrides the
 # target DO (used for cross-DO inspection / data migration).
 curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/admin/sql \
@@ -304,12 +309,40 @@ burnage search "parse_sse_usage"                 # hybrid (default)
 burnage search "auth flow" --mode fts            # keyword-only (bm25)
 burnage search "OAuth debugging" --mode vector   # semantic-only (cosine)
 burnage search "foo" --limit 50 --format json    # override table auto-detect
+burnage search "foo" -v                          # show tx_id + score + both snippets
 ```
 
-Each table row shows `match_source` (keyword / semantic / both), model,
-relative timestamp, score, and two snippets — `you:` (last user message) and
-`ast:` (assistant response) — plus the full `tx_id` and `session_id` so you
-can jump to the turn in the dashboard.
+Default layout is two lines per hit: a header (`match_source` badge · model
+· relative time) and one snippet — prefers `asst_snip` (usually the
+substantive response), falls back to `user_snip`. Box-drawing characters
+(`├ ─ │ ┤ ┌ ┐ └ ┘ ┬ ┴ ┼` etc.) are stripped at **display time only**, so
+replayed tool output doesn't drown the snippet — the underlying FTS5 index
+still contains them, so you can still search *for* ASCII tables if needed.
+
+`-v / --verbose` restores the detailed layout: adds the RRF score on line 1,
+shows both snippets when both have content, and prints a `tx_id` + `sess`
+footer suitable for piping into `burnage turn`.
+
+### `burnage turn`
+
+Dump one transaction's **full record** — all columns, untruncated
+`user_text` + `assistant_text`, metadata header (model, UTC timestamp,
+elapsed, token counts, stop reason, tools, session id, inflight state,
+Anthropic `message.id`). Useful when `burnage search` has located a row and
+you want to read the whole thing.
+
+```bash
+# from a search result, copy the tx_id and dump it:
+burnage search "that auth bug" -v
+burnage turn inflight-1776251872077-c68abdc2
+
+# or pipe-friendly:
+burnage turn <tx_id> --format json | jq '.assistant_text'
+```
+
+Text blocks preserve their original line breaks with a 2-space indent — no
+wrapping, since terminals already wrap and altering content would break
+`grep` over the output.
 
 ### `burnage quota`
 
@@ -380,7 +413,7 @@ for the `user_text` / `assistant_text` search columns) and then discarded.
 
 ## Layout
 
-- `src/lib.rs` — fetch handler, two-phase ingest (`/ingest/start` + `/finalize`), `UserStore` Durable Object with FTS5 + RRF search orchestrator, SSE parser, Vectorize wrapper (via `js_sys::Reflect` since worker 0.8 has no first-class binding), user-hash derivation, admin probes, `/_cm/search`
+- `src/lib.rs` — fetch handler, two-phase ingest (`/ingest/start` + `/finalize`), `UserStore` Durable Object with FTS5 + RRF search orchestrator, SSE parser, Vectorize wrapper (via `js_sys::Reflect` since worker 0.8 has no first-class binding), user-hash derivation, admin probes, `/_cm/search`, `/_cm/turn`
 - `wrangler.toml` — proxy worker config: DO + SQLite migration, `[ai]` binding, `[[vectorize]]` binding for the `claudemetry-turns` index, observability on
 - `burnage/` — cross-platform CLI (`whoami`, `stats`, `recent`, `search`, `quota`, `session`, `shell`)
 - `dashboard/` — Astro 6 + React dashboard worker, served behind Cloudflare Access
