@@ -79,6 +79,9 @@ struct SearchArgs {
     /// Output format. Defaults: table for tty, json otherwise.
     #[arg(long)]
     format: Option<search::Format>,
+    /// Show the RRF score, both snippets, and the tx_id + session_id footer.
+    #[arg(short = 'v', long)]
+    verbose: bool,
 }
 
 #[derive(clap::Args)]
@@ -178,6 +181,7 @@ fn main() -> Result<()> {
                 mode: args.mode,
                 limit: args.limit,
                 format: args.format,
+                verbose: args.verbose,
             });
         }
         Cmd::Turn(args) => {

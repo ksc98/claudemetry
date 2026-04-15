@@ -44,6 +44,8 @@ pub struct SearchOpts {
     pub mode: Mode,
     pub limit: u32,
     pub format: Option<Format>,
+    /// When true, include tx_id + session_id footer per hit.
+    pub verbose: bool,
 }
 
 #[derive(Deserialize)]
@@ -116,12 +118,12 @@ pub fn run(opts: SearchOpts) -> Result<()> {
 
     match fmt {
         Format::Json => println!("{}", text.trim()),
-        Format::Table => render_table(&parsed),
+        Format::Table => render_table(&parsed, opts.verbose),
     }
     Ok(())
 }
 
-fn render_table(resp: &SearchResp) {
+fn render_table(resp: &SearchResp, verbose: bool) {
     if resp.results.is_empty() {
         println!("{}", "no matches".dark_grey());
         return;
@@ -137,11 +139,11 @@ fn render_table(resp: &SearchResp) {
         if i > 0 {
             println!();
         }
-        render_hit(h);
+        render_hit(h, verbose);
     }
 }
 
-fn render_hit(h: &Hit) {
+fn render_hit(h: &Hit, verbose: bool) {
     let badge: crossterm::style::StyledContent<String> = match h.match_source.as_str() {
         "fts" => "keyword".to_string().cyan(),
         "vector" => "semantic".to_string().magenta(),
@@ -150,44 +152,76 @@ fn render_hit(h: &Hit) {
     };
     let when = fmt_ago(h.ts);
     let model = h.model.clone().unwrap_or_else(|| "?".to_string());
-    println!(
-        "{} {}  {}  {}",
-        badge.bold(),
-        model.dark_grey(),
-        when.dark_grey(),
-        format!("{:.3}", h.score).dark_grey(),
-    );
-    if let Some(s) = &h.user_snip {
-        if !s.is_empty() {
-            print_snippet("you", s, true);
-        }
+    // Line 1: badge · model · when (score only in verbose — RRF scale is
+    // confusing at a glance and match_source already tells the story).
+    if verbose {
+        println!(
+            "{} {}  {}  {}",
+            badge.bold(),
+            model.dark_grey(),
+            when.dark_grey(),
+            format!("{:.3}", h.score).dark_grey(),
+        );
+    } else {
+        println!("{} {}  {}", badge.bold(), model.dark_grey(), when.dark_grey());
     }
-    if let Some(s) = &h.asst_snip {
-        if !s.is_empty() {
-            print_snippet("ast", s, false);
+    // Line 2: one snippet. Prefer asst_snip (usually the substantive
+    // response); fall back to user_snip if the asst text was empty.
+    let snip = h
+        .asst_snip
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or(h.user_snip.as_deref())
+        .unwrap_or("");
+    let role_tag = if h
+        .asst_snip
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        "ast".dark_grey()
+    } else {
+        "you".cyan()
+    };
+    let cleaned = clean_snippet_for_display(snip);
+    println!("  {} {}", role_tag, cleaned);
+    // Verbose: restore the old tx/sess footer and the suppressed snippet.
+    if verbose {
+        if let Some(s) = &h.user_snip {
+            if !s.trim().is_empty() && h.asst_snip.as_deref().is_some_and(|a| !a.trim().is_empty()) {
+                let cleaned_u = clean_snippet_for_display(s);
+                println!("  {} {}", "you".cyan(), cleaned_u);
+            }
         }
+        let session = h.session_id.clone().unwrap_or_else(|| "-".to_string());
+        println!(
+            "  {} {}  {} {}",
+            "tx".dark_grey(),
+            h.tx_id.clone().dark_grey(),
+            "sess".dark_grey(),
+            session.dark_grey(),
+        );
     }
-    // Second row: id + session for tx lookup.
-    let session = h.session_id.clone().unwrap_or_else(|| "-".to_string());
-    println!(
-        "    {} {}  {} {}",
-        "tx".dark_grey(),
-        h.tx_id.clone().dark_grey(),
-        "sess".dark_grey(),
-        session.dark_grey(),
-    );
 }
 
-fn print_snippet(role: &str, text: &str, is_user: bool) {
-    let tag = if is_user {
-        role.cyan()
-    } else {
-        role.dark_grey()
-    };
-    let rendered = mark_to_ansi(text);
-    // Collapse whitespace so multi-line snippets fit one row.
-    let oneline: String = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
-    println!("    {} {}", tag, oneline);
+/// For display only: convert <mark> to ANSI highlight, strip ASCII
+/// box-drawing characters (replaced with a single space), collapse runs of
+/// whitespace. The underlying FTS5 index keeps the original text — these
+/// edits are pure presentation.
+fn clean_snippet_for_display(text: &str) -> String {
+    let ansi = mark_to_ansi(text);
+    // Strip box-drawing + common unicode "draw" chars that only exist in
+    // replayed tool output, never in actual prose. Replace with space so
+    // word boundaries still separate.
+    let filtered: String = ansi
+        .chars()
+        .map(|c| match c {
+            '│' | '├' | '┤' | '┬' | '┴' | '┼' | '┘' | '└' | '┌' | '┐' | '─' | '━'
+            | '┃' | '╎' | '╏' | '╌' | '╍' => ' ',
+            _ => c,
+        })
+        .collect();
+    // Collapse whitespace runs so the snippet fits on one row.
+    filtered.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // Convert SQLite's `<mark>…</mark>` snippet highlights into ANSI bold yellow,
