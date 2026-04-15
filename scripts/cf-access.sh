@@ -9,8 +9,8 @@
 #   $DOMAIN/_cm/*     → Bypass, "bypass-everyone" (curl admin probes)
 #
 # Usage:
-#   export CF_API_TOKEN=<Access: Apps and Policies Edit scope>
-#   export CF_ACCOUNT_ID=<account id>
+#   export CLOUDFLARE_API_TOKEN=<Access: Apps and Policies Edit scope>
+#   export CLOUDFLARE_ACCOUNT_ID=<account id>
 #   just cf-access     # or  ./scripts/cf-access.sh
 
 set -euo pipefail
@@ -23,12 +23,12 @@ if [[ -f .env ]]; then
   set +o allexport
 fi
 
-: "${CF_API_TOKEN:?set CF_API_TOKEN (Access: Apps and Policies Edit scope)}"
-: "${CF_ACCOUNT_ID:?set CF_ACCOUNT_ID}"
+: "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN (Access: Apps and Policies Edit scope)}"
+: "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID}"
 : "${DOMAIN:?set DOMAIN in .env or the environment}"
 
-API="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/access"
-AUTH="Authorization: Bearer $CF_API_TOKEN"
+API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/access"
+AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
 
 api() {
   local method="$1" path="$2" body="${3-}"
