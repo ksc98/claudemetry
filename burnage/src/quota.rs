@@ -180,6 +180,20 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     let vec_storage = gql(&api_token, VEC_STORAGE_Q, &vars)?;
     let builds = gql(&api_token, BUILD_Q, &vars)?;
     let ai = gql(&api_token, AI_Q, &vars)?;
+    // Workers AI resets at 00:00 UTC, so a separate "today" query tracks
+    // the only window that actually matters for the daily allocation.
+    let today_from = format!(
+        "{:04}-{:02}-{:02}T00:00:00Z",
+        Utc::now().year(),
+        Utc::now().month(),
+        Utc::now().day()
+    );
+    let ai_today_vars = json!({
+        "acct": account_id,
+        "from": today_from,
+        "to": to,
+    });
+    let ai_today = gql(&api_token, AI_Q, &ai_today_vars)?;
 
     let ws = aggregate_workers(&workers);
     let dos = aggregate_dos(&do_inv);
@@ -190,7 +204,7 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     let vec_s = aggregate_vec_storage(&vec_storage);
     let build_min = sum_build_minutes(&builds);
     let ai_rows = aggregate_ai(&ai);
-    let window_days = window_days(&from, &to);
+    let ai_today_rows = aggregate_ai(&ai_today);
 
     println!(
         "{} {} → {} {}",
@@ -211,7 +225,7 @@ pub fn run(args: QuotaArgs) -> Result<()> {
         &vec_s,
         build_min,
         &ai_rows,
-        window_days,
+        &ai_today_rows,
     );
     println!();
     print_workers(&sty, &ws);
@@ -615,25 +629,6 @@ fn aggregate_ai(v: &Value) -> Vec<AiRow> {
     out
 }
 
-// Approximate days spanned by the window (for daily-allocated quotas
-// like Workers AI). Times are RFC3339 UTC ("YYYY-MM-DDTHH:MM:SSZ"), so
-// epoch-second diff / 86400 is accurate enough; we also floor at 1 day
-// so a short window still shows a non-zero allocation.
-fn window_days(from: &str, to: &str) -> f64 {
-    let parse = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|d| d.with_timezone(&chrono::Utc))
-    };
-    match (parse(from), parse(to)) {
-        (Some(f), Some(t)) => {
-            let secs = (t - f).num_seconds().max(0) as f64;
-            (secs / 86_400.0).max(1.0)
-        }
-        _ => 1.0,
-    }
-}
-
 fn sum_build_minutes(v: &Value) -> f64 {
     account(v)
         .and_then(|a| a.get("workersBuildsBuildMinutesAdaptiveGroups"))
@@ -672,7 +667,7 @@ fn print_totals(
     vec_s: &[VecStorageRow],
     build_min: f64,
     ai: &[AiRow],
-    window_days: f64,
+    ai_today: &[AiRow],
 ) {
     let total_req: u64 = ws.iter().map(|w| w.requests).sum();
     let total_err: u64 = ws.iter().map(|w| w.errors).sum();
@@ -694,14 +689,9 @@ fn print_totals(
     let total_ai_requests: u64 = ai.iter().map(|r| r.requests).sum();
     let total_ai_neurons: f64 = ai.iter().map(|r| r.neurons).sum();
     // Workers AI resets at 00:00 UTC and does not pool across days, so the
-    // correct billable comparison is a per-day average against the 10k/day
-    // allocation — not window-total against window_days * 10k (that would
-    // hide a single-day overage under an under-used month).
-    let ai_daily_avg: f64 = if window_days > 0.0 {
-        total_ai_neurons / window_days
-    } else {
-        total_ai_neurons
-    };
+    // "billable" comparison is today's usage vs the 10k/day allocation.
+    let total_ai_neurons_today: f64 = ai_today.iter().map(|r| r.neurons).sum();
+    let total_ai_requests_today: u64 = ai_today.iter().map(|r| r.requests).sum();
 
     println!("{}", sty.header("ACCOUNT TOTALS"));
     println!(
@@ -717,9 +707,9 @@ fn print_totals(
     fn overage(used: f64, limit: f64, rate_per_unit: f64) -> f64 {
         ((used - limit).max(0.0)) * rate_per_unit
     }
-    // AI overage uses the daily-avg model: per-day overage × days in window.
-    let ai_overage_usd = (ai_daily_avg - AI_NEURONS_PER_DAY).max(0.0)
-        * window_days
+    // AI overage: today's usage beyond the 10k daily allocation. Bills
+    // happen per calendar day; this is the only honest number to show.
+    let ai_overage_usd = (total_ai_neurons_today - AI_NEURONS_PER_DAY).max(0.0)
         * RATE_AI_PER_1K
         / 1_000.0;
 
@@ -814,10 +804,10 @@ fn print_totals(
             ),
         ),
         (
-            "ai neurons/day avg",
-            human_num(ai_daily_avg),
+            "ai neurons today",
+            human_num(total_ai_neurons_today),
             human_num(AI_NEURONS_PER_DAY),
-            ai_daily_avg / AI_NEURONS_PER_DAY,
+            total_ai_neurons_today / AI_NEURONS_PER_DAY,
             ai_overage_usd,
         ),
         (
@@ -903,8 +893,22 @@ fn print_totals(
                 sty.dim("0")
             },
         ),
-        ("ai requests", sty.dim(&human_count(total_ai_requests))),
-        ("ai neurons total", sty.dim(&human_num(total_ai_neurons))),
+        (
+            "ai requests",
+            sty.dim(&format!(
+                "{} ({} today)",
+                human_count(total_ai_requests),
+                human_count(total_ai_requests_today),
+            )),
+        ),
+        (
+            "ai neurons",
+            sty.dim(&format!(
+                "{} ({} today)",
+                human_num(total_ai_neurons),
+                human_num(total_ai_neurons_today),
+            )),
+        ),
     ];
     for (label, val) in &info_rows {
         let pad = " ".repeat(label_w.saturating_sub(label.len()));

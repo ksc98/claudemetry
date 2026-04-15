@@ -18,6 +18,10 @@ pub fn do_run(base: &str, token: &str) -> Result<()> {
         .get("user_hash")
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>");
+    let email = whoami
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let turns = i64_at(&stats, "turns").max(0) as u64;
     let storage_bytes = i64_at(&stats, "storage_bytes").max(0) as u64;
     let first_ms = i64_at(&stats, "first_ts");
@@ -51,8 +55,16 @@ pub fn do_run(base: &str, token: &str) -> Result<()> {
     let window = format_window(first_ms, last_ms);
     let rate = compute_rate(turns, first_ms, last_ms);
 
+    // Prefer email (human-readable) with the user_hash shown dimmed
+    // alongside for DO addressability. Falls back to bare hash when email
+    // isn't available (e.g. api-key auth path, or old OAuth token).
+    let user_cell = if email.is_empty() {
+        sty.bold(user_hash)
+    } else {
+        format!("{}  {}", sty.bold(email), sty.dim(user_hash))
+    };
     let rows: Vec<(&str, String)> = vec![
-        ("user", sty.bold(user_hash)),
+        ("user", user_cell),
         ("turns", sty.bold(&turns_str)),
         ("storage", format!("{cap_str}  {bar_str}  {pct_str}")),
         ("pages", format_pages(&sty, storage_bytes, turns)),
