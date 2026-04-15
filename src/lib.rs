@@ -975,13 +975,39 @@ impl UserStore {
         )?;
         let rows: Vec<serde_json::Value> = cursor.to_array().unwrap_or_default();
 
+        // Total eligible rows for progress tracking. Cheap — indexed scan on
+        // `ts` with a length() predicate; runs once per batch (~1ms).
+        let total_rows: i64 = {
+            let c = sql.exec(
+                "SELECT COUNT(*) AS n FROM transactions
+                 WHERE (length(COALESCE(user_text, '')) + length(COALESCE(assistant_text, ''))) > 3",
+                None,
+            )?;
+            let arr: Vec<serde_json::Value> = c.to_array().unwrap_or_default();
+            arr.first()
+                .and_then(|v| v.get("n"))
+                .and_then(|x| x.as_i64())
+                .unwrap_or(0)
+        };
+
         let scanned = rows.len() as i64;
-        let mut upserted = 0i64;
         let mut skipped_empty = 0i64;
         let mut embed_errors = 0i64;
-        let mut upsert_errors = 0i64;
         let mut oldest_ts = before_ts;
         let mut processed: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+
+        // Phase 1: sequential embeds. Workers AI is fast (~50ms per call), but
+        // running in parallel risks rate-limit errors we'd then have to retry.
+        // The real cost savings come from phase 2.
+        struct Pending {
+            tx_id: String,
+            session_id: Option<String>,
+            ts: i64,
+            text_len: i64,
+            embed_ms: i64,
+            values: Vec<f32>,
+        }
+        let mut pending: Vec<Pending> = Vec::with_capacity(rows.len());
 
         for row in &rows {
             let tx_id = row
@@ -1004,6 +1030,7 @@ impl UserStore {
                 .unwrap_or("");
             let combined = format!("{}\n---\n{}", ut, at);
             let text_len = combined.len() as i64;
+
             if combined.trim().len() <= 3 {
                 skipped_empty += 1;
                 processed.push(json!({
@@ -1018,44 +1045,14 @@ impl UserStore {
             let embed_result = embed_text(&self.env, &combined).await;
             let embed_ms = Date::now().as_millis() as i64 - embed_start;
             match embed_result {
-                Some(vec) => {
-                    let upsert_start = Date::now().as_millis() as i64;
-                    let upsert_result = vectorize_upsert(
-                        &self.env,
-                        &user_hash,
-                        &tx_id,
-                        session_id.as_deref(),
-                        ts,
-                        &vec,
-                    )
-                    .await;
-                    let upsert_ms = Date::now().as_millis() as i64 - upsert_start;
-                    match upsert_result {
-                        Ok(()) => {
-                            upserted += 1;
-                            processed.push(json!({
-                                "tx_id": tx_id,
-                                "ts": ts,
-                                "status": "upserted",
-                                "text_len": text_len,
-                                "embed_ms": embed_ms,
-                                "upsert_ms": upsert_ms,
-                            }));
-                        }
-                        Err(e) => {
-                            upsert_errors += 1;
-                            processed.push(json!({
-                                "tx_id": tx_id,
-                                "ts": ts,
-                                "status": "upsert_err",
-                                "text_len": text_len,
-                                "embed_ms": embed_ms,
-                                "upsert_ms": upsert_ms,
-                                "err": e,
-                            }));
-                        }
-                    }
-                }
+                Some(values) => pending.push(Pending {
+                    tx_id,
+                    session_id,
+                    ts,
+                    text_len,
+                    embed_ms,
+                    values,
+                }),
                 None => {
                     embed_errors += 1;
                     processed.push(json!({
@@ -1067,6 +1064,45 @@ impl UserStore {
                     }));
                 }
             }
+        }
+
+        // Phase 2: single batched upsert. One Vectorize round-trip for up to
+        // batch_size records — the old per-row path was spending ~450ms per
+        // upsert, which dominated the batch wall-clock time.
+        let batch_upsert_start = Date::now().as_millis() as i64;
+        let batch_items: Vec<BackfillVector<'_>> = pending
+            .iter()
+            .map(|p| BackfillVector {
+                tx_id: &p.tx_id,
+                session_id: p.session_id.as_deref(),
+                ts: p.ts,
+                values: p.values.clone(),
+            })
+            .collect();
+        let batch_upsert_result = vectorize_upsert_many(&self.env, &user_hash, &batch_items).await;
+        let batch_upsert_ms = Date::now().as_millis() as i64 - batch_upsert_start;
+
+        let (upserted, upsert_errors, upsert_err_msg) = match &batch_upsert_result {
+            Ok(()) => (pending.len() as i64, 0i64, None),
+            Err(e) => (0i64, pending.len() as i64, Some(e.clone())),
+        };
+        for p in &pending {
+            let status = if batch_upsert_result.is_ok() {
+                "upserted"
+            } else {
+                "upsert_err"
+            };
+            let mut entry = json!({
+                "tx_id": p.tx_id,
+                "ts": p.ts,
+                "status": status,
+                "text_len": p.text_len,
+                "embed_ms": p.embed_ms,
+            });
+            if let (Some(msg), Some(obj)) = (upsert_err_msg.as_deref(), entry.as_object_mut()) {
+                obj.insert("err".into(), json!(msg));
+            }
+            processed.push(entry);
         }
 
         // "done" when the SELECT returned less than a full batch — no older
@@ -1089,6 +1125,8 @@ impl UserStore {
             "next_before_ts": next_before_ts,
             "done": done,
             "rows": processed,
+            "total_rows": total_rows,
+            "batch_upsert_ms": batch_upsert_ms,
         }))
     }
 
@@ -1689,6 +1727,61 @@ async fn embed_text(env: &Env, text: &str) -> Option<Vec<f32>> {
             .map(|v| v.as_f64().unwrap_or(0.0) as f32)
             .collect(),
     )
+}
+
+/// Batch upsert for backfill and any other caller with multiple vectors
+/// ready at once. Vectorize accepts an array of records in a single JS
+/// call, so this amortizes the ~400ms round-trip across the whole batch.
+pub struct BackfillVector<'a> {
+    pub tx_id: &'a str,
+    pub session_id: Option<&'a str>,
+    pub ts: i64,
+    pub values: Vec<f32>,
+}
+
+async fn vectorize_upsert_many(
+    env: &Env,
+    user_hash: &str,
+    items: &[BackfillVector<'_>],
+) -> std::result::Result<(), String> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let vec_binding = env
+        .get_binding::<VectorizeBinding>("VECTORIZE")
+        .map_err(|e| format!("binding: {e}"))?;
+
+    #[derive(Serialize)]
+    struct Metadata<'a> {
+        session_id: &'a str,
+        ts: i64,
+    }
+    #[derive(Serialize)]
+    struct VectorRecord<'a> {
+        id: String,
+        values: &'a [f32],
+        namespace: &'a str,
+        metadata: Metadata<'a>,
+    }
+
+    let records: Vec<VectorRecord<'_>> = items
+        .iter()
+        .map(|it| VectorRecord {
+            id: format!("{}:{}", user_hash, it.tx_id),
+            values: &it.values,
+            namespace: user_hash,
+            metadata: Metadata {
+                session_id: it.session_id.unwrap_or(""),
+                ts: it.ts,
+            },
+        })
+        .collect();
+
+    let arg = serde_wasm_bindgen::to_value(&records).map_err(|e| format!("encode: {e}"))?;
+    call_js_method(&vec_binding.0, "upsert", &[arg])
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("upsert: {:?}", e))
 }
 
 async fn vectorize_upsert(

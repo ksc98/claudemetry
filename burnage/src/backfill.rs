@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use crossterm::style::Stylize;
 use serde_json::Value;
 use std::io::Write;
+use std::time::Instant;
 
 pub struct BackfillOpts {
     pub base: String,
@@ -22,7 +23,10 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
 
     let mut before_ts: Option<i64> = None;
     let mut totals = Totals::default();
-    let mut page = 0;
+    let mut page = 0i64;
+    let mut total_rows: i64 = 0;
+    let mut total_batches: i64 = 0;
+    let started = Instant::now();
 
     loop {
         page += 1;
@@ -31,14 +35,18 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
             body["before_ts"] = serde_json::json!(ts);
         }
 
-        // Each batch does batch_size sequential Workers AI embeds + upserts,
-        // so a full batch can take 15–30s before we see the response. Print
-        // a pre-flight line (no newline, flushed) so the user sees that
-        // we're blocked on the server, not hung.
-        let pre = format!("  {} requesting…", format!("batch {page}").dark_grey());
+        // Pre-flight line (no newline, flushed) so the user sees that we're
+        // blocked on the server, not hung.
+        let header = if total_batches > 0 {
+            format!("batch {}/{}", page, total_batches)
+        } else {
+            format!("batch {}", page)
+        };
+        let pre = format!("  {} requesting…", header.clone().dark_grey());
         print!("\r{pre}");
         let _ = std::io::stdout().flush();
 
+        let req_start = Instant::now();
         let resp = ureq::post(&url).set("Authorization", &auth).send_json(body);
         let text = match resp {
             Ok(r) => r.into_string()?,
@@ -48,6 +56,7 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
             }
             Err(e) => return Err(anyhow!(e)),
         };
+        let req_ms = req_start.elapsed().as_millis() as i64;
 
         let v: Value =
             serde_json::from_str(&text).map_err(|e| anyhow!("parse {text}: {e}"))?;
@@ -56,6 +65,7 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
         let skipped = i64_at(&v, "skipped_empty");
         let embed_err = i64_at(&v, "embed_errors");
         let upsert_err = i64_at(&v, "upsert_errors");
+        let batch_upsert_ms = i64_at(&v, "batch_upsert_ms");
         let done = v.get("done").and_then(|x| x.as_bool()).unwrap_or(true);
         let empty_rows: Vec<Value> = Vec::new();
         let rows = v
@@ -63,46 +73,72 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
             .and_then(|x| x.as_array())
             .unwrap_or(&empty_rows);
 
+        // Cache the total on the first response — server recomputes it every
+        // batch but it only changes if new turns land mid-backfill, which
+        // isn't a case we need to be precise for.
+        if total_rows == 0 {
+            total_rows = i64_at(&v, "total_rows");
+            if total_rows > 0 && opts.batch_size > 0 {
+                total_batches = (total_rows + opts.batch_size - 1) / opts.batch_size;
+            }
+        }
+
         totals.scanned += scanned;
         totals.upserted += upserted;
         totals.skipped += skipped;
         totals.embed_err += embed_err;
         totals.upsert_err += upsert_err;
 
-        // Clear the pre-flight "requesting…" line, then print the batch
-        // header followed by one line per row with timings.
+        // Clear the pre-flight line, then print the batch header (with total
+        // if known) and a progress bar tracking scanned-so-far / total.
         print!("\r\x1b[2K");
+        let embed_sum: i64 = rows.iter().map(|r| i64_at(r, "embed_ms")).sum();
+        let bar = progress_bar(totals.scanned, total_rows, 24);
+        let pct = if total_rows > 0 {
+            (totals.scanned as f64 / total_rows as f64) * 100.0
+        } else {
+            0.0
+        };
+        let header_line = if total_batches > 0 {
+            format!("batch {}/{}", page, total_batches)
+        } else {
+            format!("batch {}", page)
+        };
         println!(
-            "  {} scanned={} upserted={} skipped={} embed_err={} upsert_err={} ({:.1}s)",
-            format!("batch {page}").dark_grey(),
+            "  {} {}  {} {}/{} ({:.1}%)  scanned={} upserted={} skipped={} embed_err={} upsert_err={}  (embed {:.1}s · upsert {:.2}s · rtt {:.1}s)",
+            header_line.dark_grey(),
+            bar,
+            "progress".dark_grey(),
+            fmt_int(totals.scanned),
+            fmt_int(total_rows.max(totals.scanned)),
+            pct,
             scanned,
             upserted,
             skipped,
             embed_err,
             upsert_err,
-            (rows
-                .iter()
-                .map(|r| i64_at(r, "embed_ms") + i64_at(r, "upsert_ms"))
-                .sum::<i64>() as f64)
-                / 1000.0,
+            embed_sum as f64 / 1000.0,
+            batch_upsert_ms as f64 / 1000.0,
+            req_ms as f64 / 1000.0,
         );
         for r in rows {
             let tx_id = r.get("tx_id").and_then(|x| x.as_str()).unwrap_or("");
             let status = r.get("status").and_then(|x| x.as_str()).unwrap_or("");
             let embed_ms = i64_at(r, "embed_ms");
-            let upsert_ms = i64_at(r, "upsert_ms");
             let text_len = i64_at(r, "text_len");
             let marker = match status {
                 "upserted" => "✓".green().to_string(),
                 "skipped_empty" => "·".dark_grey().to_string(),
                 _ => "⚠".red().to_string(),
             };
-            let timing = match status {
-                "upserted" => format!("embed {}ms  upsert {}ms", embed_ms, upsert_ms),
-                "embed_err" => format!("embed {}ms  [embed failed]", embed_ms).red().to_string(),
+            let detail = match status {
+                "upserted" => format!("embed {}ms", embed_ms),
+                "embed_err" => format!("embed {}ms  [embed failed]", embed_ms)
+                    .red()
+                    .to_string(),
                 "upsert_err" => {
                     let err = r.get("err").and_then(|x| x.as_str()).unwrap_or("?");
-                    format!("embed {}ms  upsert {}ms  [{}]", embed_ms, upsert_ms, err)
+                    format!("embed {}ms  [batch upsert failed: {}]", embed_ms, err)
                         .red()
                         .to_string()
                 }
@@ -114,16 +150,13 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
                 marker,
                 short_tx(tx_id).dark_grey(),
                 format!("{} B", fmt_int(text_len)).dark_grey(),
-                timing,
+                detail,
             );
         }
 
         if done {
             break;
         }
-        // Server returned a full batch, so older rows remain. Advance the
-        // cursor to the oldest ts we just processed — strict `<` on the next
-        // query excludes the last-processed row.
         let next = v
             .get("next_before_ts")
             .and_then(|x| x.as_i64())
@@ -132,14 +165,16 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
     }
 
     println!();
+    let total_s = started.elapsed().as_secs_f64();
     println!(
-        "{} scanned={} upserted={} skipped={} embed_err={} upsert_err={}",
+        "{} scanned={} upserted={} skipped={} embed_err={} upsert_err={}  ({:.1}s wall)",
         "total".yellow().bold(),
-        totals.scanned,
-        totals.upserted,
-        totals.skipped,
-        totals.embed_err,
-        totals.upsert_err,
+        fmt_int(totals.scanned),
+        fmt_int(totals.upserted),
+        fmt_int(totals.skipped),
+        fmt_int(totals.embed_err),
+        fmt_int(totals.upsert_err),
+        total_s,
     );
     Ok(())
 }
@@ -159,8 +194,6 @@ fn i64_at(v: &Value, key: &str) -> i64 {
         .unwrap_or(0)
 }
 
-// `inflight-1776290872285-abc123ef` is 33 chars — too wide for a per-row
-// line. Keep the distinguishing suffix so lines remain clickable-unique.
 fn short_tx(s: &str) -> String {
     if s.len() <= 24 {
         s.to_string()
@@ -186,4 +219,19 @@ fn fmt_int(n: i64) -> String {
     } else {
         forward
     }
+}
+
+fn progress_bar(done: i64, total: i64, width: usize) -> String {
+    if total <= 0 {
+        return format!("[{}]", "·".repeat(width).dark_grey());
+    }
+    let ratio = (done as f64 / total as f64).clamp(0.0, 1.0);
+    let filled = (ratio * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let bar = format!(
+        "{}{}",
+        "█".repeat(filled).green(),
+        "░".repeat(width - filled).dark_grey(),
+    );
+    format!("[{}]", bar)
 }
