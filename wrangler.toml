@@ -1,0 +1,27 @@
+name = "cc-proxy"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-11-01"
+workers_dev = false
+preview_urls = false
+
+# To bind a custom domain, either:
+#   (a) add `routes = [{ pattern = "claude.yourdomain.com", custom_domain = true }]` here
+#       (requires the zone to be on the same Cloudflare account), or
+#   (b) leave this block absent and bind the domain via the Cloudflare dashboard
+#       (Workers → cc-proxy → Settings → Domains & Routes) — this is a one-time UI step.
+
+[build]
+command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+
+[dev]
+port = 8787
