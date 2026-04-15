@@ -12,18 +12,18 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
          │ POST /v1/messages                  │ unchanged
          ▼                                    │
   ┌──────────────────────────────────────────────┐
-  │  cc-proxy (Rust Worker)                     │
+  │  cc-proxy (Rust Worker)                      │
   │                                              │
-  │   identify         →  user_hash =           │
+  │   identify         →  user_hash =            │
   │                        sha256(salt ‖ JWT.sub)│
-  │                        truncate 8 bytes     │
+  │                        truncate 8 bytes      │
   │                                              │
   │   forward          →  streaming response     │──► client
   │                                              │
   │   ctx.wait_until:                            │
   │     parse SSE usage                          │
-  │     stub = USER_STORE.id_from_name(hash)    │
-  │     stub.fetch("/ingest", JSON record)     ─┼──┐
+  │     stub = USER_STORE.id_from_name(hash)     │
+  │     stub.fetch("/ingest", JSON record)      ─┼──┐
   └──────────────────────────────────────────────┘  │
                                                     ▼
                         ┌──────────────────────────────┐
@@ -168,8 +168,10 @@ Each transaction also emits two structured JSON log lines to `wrangler tail`:
 ## Layout
 
 - `src/lib.rs` — fetch handler, `UserStore` Durable Object, SSE parser, user-hash derivation, admin probes
-- `wrangler.toml` — worker config (Durable Object binding + SQLite migration, observability on)
-- `justfile` — `local`, `local-tee`, `build`, `login`, `deploy`, `tail`, `clean`
+- `wrangler.toml` — proxy worker config (Durable Object binding + SQLite migration, observability on)
+- `dashboard/` — Astro 6 + React dashboard worker, served behind Cloudflare Access
+- `scripts/cf-access.sh` — idempotent provisioner for the Access apps/policies (`just cf-access`)
+- `justfile` — `local`, `local-tee`, `build`, `login`, `deploy`, `tail`, `clean`, `dashboard-dev`, `dashboard-deploy`, `dashboard-tail`, `deploy-all`, `cf-access`
 
 ## Notes on trust
 
