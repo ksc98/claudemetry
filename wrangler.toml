@@ -1,6 +1,6 @@
 name = "cc-proxy"
 main = "build/worker/shim.mjs"
-compatibility_date = "2024-11-01"
+compatibility_date = "2025-01-01"
 workers_dev = false
 preview_urls = false
 
@@ -9,6 +9,18 @@ preview_urls = false
 #       (requires the zone to be on the same Cloudflare account), or
 #   (b) leave this block absent and bind the domain via the Cloudflare dashboard
 #       (Workers → cc-proxy → Settings → Domains & Routes) — this is a one-time UI step.
+
+# One Durable Object instance per user_hash. Each instance gets its own
+# private SQLite database (via `state.storage().sql()`). No provisioning —
+# the first request with a given name materializes the DO + its DB.
+[[durable_objects.bindings]]
+name = "USER_STORE"
+class_name = "UserStore"
+
+# SQLite-backed DOs require `new_sqlite_classes` (not `new_classes`).
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserStore"]
 
 [build]
 command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
