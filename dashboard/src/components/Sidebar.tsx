@@ -16,8 +16,10 @@ function shortSession(id: string): string {
   return id.slice(0, 8);
 }
 
+const POLL_MS = 5_000;
+
 export function Sidebar({
-  sessions,
+  sessions: initialSessions,
   currentSessionId,
 }: {
   sessions: SessionSummary[];
@@ -26,6 +28,7 @@ export function Sidebar({
   const [collapsed, setCollapsed] = React.useState(false);
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   const [currentPath, setCurrentPath] = React.useState<string>("/");
+  const [sessions, setSessions] = React.useState<SessionSummary[]>(initialSessions);
 
   // Load collapse state + capture current path after hydrate.
   React.useEffect(() => {
@@ -35,6 +38,39 @@ export function Sidebar({
       /* localStorage blocked */
     }
     setCurrentPath(window.location.pathname);
+  }, []);
+
+  // Poll /api/sessions.json to keep the list live.
+  React.useEffect(() => {
+    let cancelled = false;
+    let inflight = false;
+    const tick = async () => {
+      if (inflight || document.hidden) return;
+      inflight = true;
+      try {
+        const res = await fetch("/api/sessions.json", {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as SessionSummary[];
+        if (!cancelled && Array.isArray(data)) setSessions(data);
+      } catch {
+        /* next tick will retry */
+      } finally {
+        inflight = false;
+      }
+    };
+    const id = window.setInterval(tick, POLL_MS);
+    const onVis = () => {
+      if (!document.hidden) void tick();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
   const toggle = React.useCallback(() => {

@@ -66,7 +66,10 @@ function fmtBurn(n: number): string {
           <span class="text-xs text-[var(--color-muted-foreground)] hidden sm:inline">Claude Code observability</span>
           {
             headerStats && (
-              <div class="hidden md:flex items-center gap-3 pl-4 border-l border-[var(--color-border)] text-xs text-[var(--color-muted-foreground)]">
+              <div
+                data-live-region="header-stats"
+                class="hidden md:flex items-center gap-3 pl-4 border-l border-[var(--color-border)] text-xs text-[var(--color-muted-foreground)]"
+              >
                 {headerStats.activeSession ? (
                   <span class="flex items-center gap-1.5">
                     <span class="live-dot" />
