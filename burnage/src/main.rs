@@ -41,13 +41,11 @@ enum Cmd {
     /// Session operations.
     #[command(subcommand)]
     Session(SessionCmd),
-    /// Cloudflare usage + live per-user Durable Object state.
-    /// With no subcommand, shows a combined top-down summary
-    /// (your DO + Vectorize index, if CF creds are available).
-    Quota {
-        #[command(subcommand)]
-        sub: Option<QuotaCmd>,
-    },
+    /// Combined usage view: your DO state + account-wide Cloudflare
+    /// Workers/DO totals + the Vectorize index. CF sections are
+    /// best-effort — they print a hint when CF_API_TOKEN +
+    /// CF_ACCOUNT_ID aren't set rather than erroring.
+    Quota(QuotaArgs),
     /// Full-text + semantic search against your own sessions.
     Search(SearchArgs),
     /// Dump one transaction's full record (untruncated user_text + asst_text).
@@ -100,25 +98,20 @@ struct ShellArgs {
     format: Option<shell::Format>,
 }
 
-#[derive(Subcommand)]
-enum QuotaCmd {
-    /// Cloudflare Workers + Durable Objects usage vs Paid plan allocation.
-    Cf(QuotaArgs),
-    /// Live DO state: turns, storage bytes, active window, token totals.
-    Do,
-}
-
 #[derive(clap::Args)]
 struct QuotaArgs {
-    /// Time window: 1h, 24h, 7d, 30d, or month (calendar month-to-date UTC).
+    /// Time window for the CF account totals: 1h, 24h, 7d, 30d, or month
+    /// (calendar month-to-date UTC).
     #[arg(default_value = "30d")]
     window: String,
-    /// Cloudflare API token with Account Analytics: Read.
+    /// Cloudflare API token with Account Analytics: Read. When unset, the
+    /// CF account-totals section is skipped with a hint.
     #[arg(long, env = "CF_API_TOKEN", hide_env_values = true)]
-    api_token: String,
-    /// Cloudflare account ID.
+    api_token: Option<String>,
+    /// Cloudflare account ID. When unset, the CF account-totals section
+    /// is skipped with a hint.
     #[arg(long, env = "CF_ACCOUNT_ID")]
-    account_id: String,
+    account_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -147,26 +140,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let url_opt = cli.url.clone();
     let (method, path) = match cli.cmd {
-        Cmd::Quota { sub: Some(QuotaCmd::Cf(args)) } => {
-            return quota::run(quota::QuotaArgs {
-                window: args.window,
-                api_token: args.api_token,
-                account_id: args.account_id,
-            });
-        }
-        Cmd::Quota { sub: Some(QuotaCmd::Do) } => {
-            let token = read_token()?;
-            let base = resolve_base(url_opt.as_deref())?;
-            return do_usage::do_run(base, &token);
-        }
-        Cmd::Quota { sub: None } => {
-            // Top-down summary. Shows your DO state always; the Vectorize
-            // section is best-effort — it fetches from the CF REST API only
-            // when CF_API_TOKEN + CF_ACCOUNT_ID are set. Missing creds print
-            // a short hint instead of erroring.
+        Cmd::Quota(args) => {
+            // Single top-down view: your DO state (requires proxy auth),
+            // then account-wide CF Workers/DO totals + Vectorize index
+            // (both best-effort — skipped with a hint when CF creds are
+            // absent, so the useful parts still render).
             let token = read_token()?;
             let base = resolve_base(url_opt.as_deref())?;
             do_usage::do_run(base, &token)?;
+            println!();
+            quota::run(quota::QuotaArgs {
+                window: args.window,
+                api_token: args.api_token,
+                account_id: args.account_id,
+            })?;
             println!();
             do_usage::vectorize_summary("claudemetry-turns");
             return Ok(());

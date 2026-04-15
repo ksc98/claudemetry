@@ -5,15 +5,26 @@ use std::collections::BTreeMap;
 use std::io::IsTerminal;
 
 // Workers Paid plan monthly allocation (included before overage).
+// Cloudflare measures storage in decimal GB (1 GB = 1_000_000_000 bytes).
 // https://developers.cloudflare.com/workers/platform/pricing/
+// https://developers.cloudflare.com/durable-objects/platform/pricing/
+// https://developers.cloudflare.com/durable-objects/platform/limits/
+// https://developers.cloudflare.com/vectorize/platform/pricing/
 const LIMIT_REQ: f64 = 10_000_000.0;
 const LIMIT_CPU_MS: f64 = 30_000_000.0;
 const LIMIT_DO_REQ: f64 = 1_000_000.0;
-const LIMIT_DO_BYTES: f64 = 5.0 * 1024.0 * 1024.0 * 1024.0;
-const LIMIT_BUILD_MIN: f64 = 3000.0;
+const LIMIT_DO_DURATION_GB_S: f64 = 400_000.0;
+const LIMIT_DO_ROWS_READ: f64 = 25_000_000_000.0;
+const LIMIT_DO_ROWS_WRITTEN: f64 = 50_000_000.0;
+const LIMIT_DO_BYTES: f64 = 5.0e9;
+const LIMIT_BUILD_MIN: f64 = 3_000.0;
+const LIMIT_VEC_QUERIED_DIMS: f64 = 50_000_000.0;
+const LIMIT_VEC_STORED_DIMS: f64 = 10_000_000.0;
 
 pub(crate) const BAR_WIDTH: usize = 24;
-pub(crate) const DO_STORAGE_LIMIT: f64 = LIMIT_DO_BYTES;
+// Per-Durable-Object SQLite storage hard cap (not the account-wide monthly
+// allocation). Used for the single-DO storage bar in `usage.rs`.
+pub(crate) const DO_STORAGE_LIMIT: f64 = 10.0e9;
 
 const WORKERS_Q: &str = r#"query W($acct:String!,$from:Time!,$to:Time!){
   viewer{accounts(filter:{accountTag:$acct}){
@@ -21,7 +32,7 @@ const WORKERS_Q: &str = r#"query W($acct:String!,$from:Time!,$to:Time!){
       filter:{datetime_geq:$from,datetime_leq:$to},
       limit:1000
     ){
-      sum{requests errors subrequests cpuTimeUs}
+      sum{requests errors subrequests cpuTimeUs wallTime duration responseBodySize clientDisconnects}
       quantiles{cpuTimeP50 cpuTimeP99}
       dimensions{scriptName}
     }
@@ -41,6 +52,18 @@ const DO_INV_Q: &str = r#"query D($acct:String!,$from:Time!,$to:Time!){
   }}
 }"#;
 
+const DO_PERIODIC_Q: &str = r#"query P($acct:String!,$from:Time!,$to:Time!){
+  viewer{accounts(filter:{accountTag:$acct}){
+    durableObjectsPeriodicGroups(
+      filter:{datetime_geq:$from,datetime_leq:$to},
+      limit:10000
+    ){
+      sum{duration cpuTime activeTime rowsRead rowsWritten exceededCpuErrors exceededMemoryErrors subrequests}
+      dimensions{namespaceId}
+    }
+  }}
+}"#;
+
 const DO_STORAGE_Q: &str = r#"query S($acct:String!,$from:Time!,$to:Time!){
   viewer{accounts(filter:{accountTag:$acct}){
     durableObjectsSqlStorageGroups(
@@ -50,6 +73,31 @@ const DO_STORAGE_Q: &str = r#"query S($acct:String!,$from:Time!,$to:Time!){
     ){
       max{storedBytes}
       dimensions{namespaceId datetime}
+    }
+  }}
+}"#;
+
+const VEC_QUERIES_Q: &str = r#"query VQ($acct:String!,$from:Time!,$to:Time!){
+  viewer{accounts(filter:{accountTag:$acct}){
+    vectorizeV2QueriesAdaptiveGroups(
+      filter:{datetime_geq:$from,datetime_leq:$to},
+      limit:1000
+    ){
+      sum{queriedVectorDimensions servedVectorCount requestDurationMs}
+      dimensions{indexName}
+    }
+  }}
+}"#;
+
+const VEC_STORAGE_Q: &str = r#"query VS($acct:String!,$from:Time!,$to:Time!){
+  viewer{accounts(filter:{accountTag:$acct}){
+    vectorizeV2StorageAdaptiveGroups(
+      filter:{datetime_geq:$from,datetime_leq:$to},
+      limit:1000,
+      orderBy:[datetime_DESC]
+    ){
+      max{storedVectorDimensions vectorCount}
+      dimensions{indexName datetime}
     }
   }}
 }"#;
@@ -67,26 +115,44 @@ const BUILD_Q: &str = r#"query B($acct:String!,$from:Time!,$to:Time!){
 
 pub struct QuotaArgs {
     pub window: String,
-    pub api_token: String,
-    pub account_id: String,
+    pub api_token: Option<String>,
+    pub account_id: Option<String>,
 }
 
 pub fn run(args: QuotaArgs) -> Result<()> {
-    let (from, to, label) = resolve_window(&args.window)?;
-    let vars = json!({ "acct": args.account_id, "from": from, "to": to });
+    let sty = Style::new(std::io::stdout().is_terminal());
 
-    let workers = gql(&args.api_token, WORKERS_Q, &vars)?;
-    let do_inv = gql(&args.api_token, DO_INV_Q, &vars)?;
-    let do_storage = gql(&args.api_token, DO_STORAGE_Q, &vars)?;
-    let builds = gql(&args.api_token, BUILD_Q, &vars)?;
+    let (api_token, account_id) = match (args.api_token, args.account_id) {
+        (Some(t), Some(a)) => (t, a),
+        _ => {
+            println!("{}", sty.header("CLOUDFLARE ACCOUNT"));
+            println!(
+                "  {}",
+                sty.dim("set CF_API_TOKEN + CF_ACCOUNT_ID for Workers/DO account totals")
+            );
+            return Ok(());
+        }
+    };
+
+    let (from, to, label) = resolve_window(&args.window)?;
+    let vars = json!({ "acct": account_id, "from": from, "to": to });
+
+    let workers = gql(&api_token, WORKERS_Q, &vars)?;
+    let do_inv = gql(&api_token, DO_INV_Q, &vars)?;
+    let do_periodic = gql(&api_token, DO_PERIODIC_Q, &vars)?;
+    let do_storage = gql(&api_token, DO_STORAGE_Q, &vars)?;
+    let vec_queries = gql(&api_token, VEC_QUERIES_Q, &vars)?;
+    let vec_storage = gql(&api_token, VEC_STORAGE_Q, &vars)?;
+    let builds = gql(&api_token, BUILD_Q, &vars)?;
 
     let ws = aggregate_workers(&workers);
     let dos = aggregate_dos(&do_inv);
     let ns_map = namespace_script_map(&do_inv);
+    let do_usage = aggregate_do_periodic(&do_periodic, &ns_map);
     let storage = aggregate_storage(&do_storage, &ns_map);
+    let vec_q = aggregate_vec_queries(&vec_queries);
+    let vec_s = aggregate_vec_storage(&vec_storage);
     let build_min = sum_build_minutes(&builds);
-
-    let sty = Style::new(std::io::stdout().is_terminal());
 
     println!(
         "{} {} → {} {}",
@@ -97,13 +163,24 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     );
     println!();
 
-    print_totals(&sty, &ws, &dos, &storage, build_min);
+    print_totals(
+        &sty,
+        &ws,
+        &dos,
+        &do_usage,
+        &storage,
+        &vec_q,
+        &vec_s,
+        build_min,
+    );
     println!();
     print_workers(&sty, &ws);
     println!();
-    print_dos(&sty, &dos);
+    print_dos(&sty, &dos, &do_usage);
     println!();
     print_storage(&sty, &storage);
+    println!();
+    print_vectorize(&sty, &vec_q, &vec_s);
 
     Ok(())
 }
@@ -164,6 +241,10 @@ struct WorkerRow {
     errors: u64,
     subreq: u64,
     cpu_us: u64,
+    wall_us: u64,
+    duration_gb_s: f64,
+    resp_bytes: u64,
+    client_disconnects: u64,
     p50: u64,
     p99: u64,
 }
@@ -187,6 +268,10 @@ fn aggregate_workers(v: &Value) -> Vec<WorkerRow> {
             errors: 0,
             subreq: 0,
             cpu_us: 0,
+            wall_us: 0,
+            duration_gb_s: 0.0,
+            resp_bytes: 0,
+            client_disconnects: 0,
             p50: 0,
             p99: 0,
         });
@@ -194,6 +279,10 @@ fn aggregate_workers(v: &Value) -> Vec<WorkerRow> {
         entry.errors += u64_at(&r, "/sum/errors");
         entry.subreq += u64_at(&r, "/sum/subrequests");
         entry.cpu_us += u64_at(&r, "/sum/cpuTimeUs");
+        entry.wall_us += u64_at(&r, "/sum/wallTime");
+        entry.duration_gb_s += f64_at(&r, "/sum/duration");
+        entry.resp_bytes += u64_at(&r, "/sum/responseBodySize");
+        entry.client_disconnects += u64_at(&r, "/sum/clientDisconnects");
         entry.p50 = entry.p50.max(u64_at(&r, "/quantiles/cpuTimeP50"));
         entry.p99 = entry.p99.max(u64_at(&r, "/quantiles/cpuTimeP99"));
     }
@@ -238,6 +327,146 @@ fn aggregate_dos(v: &Value) -> Vec<DoRow> {
     let mut out: Vec<_> = by_script.into_values().collect();
     out.sort_by(|a, b| b.requests.cmp(&a.requests));
     out
+}
+
+#[derive(Default)]
+struct DoUsageRow {
+    script: String,
+    duration_gb_s: f64,
+    cpu_us: u64,
+    active_us: u64,
+    rows_read: u64,
+    rows_written: u64,
+    subrequests: u64,
+    exceeded_cpu: u64,
+    exceeded_mem: u64,
+}
+
+fn aggregate_do_periodic(
+    v: &Value,
+    ns_map: &BTreeMap<String, String>,
+) -> Vec<DoUsageRow> {
+    let rows = account(v)
+        .and_then(|a| a.get("durableObjectsPeriodicGroups"))
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut by_script: BTreeMap<String, DoUsageRow> = BTreeMap::new();
+    for r in rows {
+        let ns = r
+            .pointer("/dimensions/namespaceId")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let script = ns_map.get(&ns).cloned().unwrap_or_else(|| {
+            if ns.is_empty() {
+                "__unknown__".into()
+            } else {
+                format!("ns:{}", &ns[..ns.len().min(8)])
+            }
+        });
+        let entry = by_script.entry(script.clone()).or_insert(DoUsageRow {
+            script,
+            ..Default::default()
+        });
+        entry.duration_gb_s += f64_at(&r, "/sum/duration");
+        entry.cpu_us += u64_at(&r, "/sum/cpuTime");
+        entry.active_us += u64_at(&r, "/sum/activeTime");
+        entry.rows_read += u64_at(&r, "/sum/rowsRead");
+        entry.rows_written += u64_at(&r, "/sum/rowsWritten");
+        entry.subrequests += u64_at(&r, "/sum/subrequests");
+        entry.exceeded_cpu += u64_at(&r, "/sum/exceededCpuErrors");
+        entry.exceeded_mem += u64_at(&r, "/sum/exceededMemoryErrors");
+    }
+    let mut out: Vec<_> = by_script.into_values().collect();
+    out.sort_by(|a, b| {
+        b.duration_gb_s
+            .partial_cmp(&a.duration_gb_s)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
+struct VecQueryRow {
+    index: String,
+    queried_dims: u64,
+    served: u64,
+    duration_ms: u64,
+}
+
+fn aggregate_vec_queries(v: &Value) -> Vec<VecQueryRow> {
+    let rows = account(v)
+        .and_then(|a| a.get("vectorizeV2QueriesAdaptiveGroups"))
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut by_index: BTreeMap<String, VecQueryRow> = BTreeMap::new();
+    for r in rows {
+        let index = r
+            .pointer("/dimensions/indexName")
+            .and_then(|x| x.as_str())
+            .unwrap_or("__unknown__")
+            .to_string();
+        let entry = by_index.entry(index.clone()).or_insert(VecQueryRow {
+            index,
+            queried_dims: 0,
+            served: 0,
+            duration_ms: 0,
+        });
+        entry.queried_dims += u64_at(&r, "/sum/queriedVectorDimensions");
+        entry.served += u64_at(&r, "/sum/servedVectorCount");
+        entry.duration_ms += u64_at(&r, "/sum/requestDurationMs");
+    }
+    let mut out: Vec<_> = by_index.into_values().collect();
+    out.sort_by(|a, b| b.queried_dims.cmp(&a.queried_dims));
+    out
+}
+
+struct VecStorageRow {
+    index: String,
+    stored_dims: u64,
+    vector_count: u64,
+}
+
+fn aggregate_vec_storage(v: &Value) -> Vec<VecStorageRow> {
+    let rows = account(v)
+        .and_then(|a| a.get("vectorizeV2StorageAdaptiveGroups"))
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut latest: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
+    for r in rows {
+        let index = r
+            .pointer("/dimensions/indexName")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let dt = r
+            .pointer("/dimensions/datetime")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let dims = u64_at(&r, "/max/storedVectorDimensions");
+        let vc = u64_at(&r, "/max/vectorCount");
+        latest
+            .entry(index)
+            .and_modify(|(cur_dt, cur_d, cur_v)| {
+                if dt > *cur_dt {
+                    *cur_dt = dt.clone();
+                    *cur_d = dims;
+                    *cur_v = vc;
+                }
+            })
+            .or_insert((dt, dims, vc));
+    }
+    latest
+        .into_iter()
+        .map(|(index, (_, stored_dims, vector_count))| VecStorageRow {
+            index,
+            stored_dims,
+            vector_count,
+        })
+        .collect()
 }
 
 fn namespace_script_map(v: &Value) -> BTreeMap<String, String> {
@@ -330,19 +559,39 @@ fn u64_at(v: &Value, ptr: &str) -> u64 {
         .unwrap_or(0)
 }
 
+fn f64_at(v: &Value, ptr: &str) -> f64 {
+    v.pointer(ptr)
+        .and_then(|x| x.as_f64().or_else(|| x.as_u64().map(|u| u as f64)))
+        .unwrap_or(0.0)
+}
+
 fn print_totals(
     sty: &Style,
     ws: &[WorkerRow],
     dos: &[DoRow],
+    do_usage: &[DoUsageRow],
     storage: &[StorageRow],
+    vec_q: &[VecQueryRow],
+    vec_s: &[VecStorageRow],
     build_min: f64,
 ) {
     let total_req: u64 = ws.iter().map(|w| w.requests).sum();
     let total_err: u64 = ws.iter().map(|w| w.errors).sum();
     let total_sub: u64 = ws.iter().map(|w| w.subreq).sum();
     let total_cpu_ms: u64 = ws.iter().map(|w| w.cpu_us).sum::<u64>() / 1000;
+    let total_wall_ms: u64 = ws.iter().map(|w| w.wall_us).sum::<u64>() / 1000;
+    let total_resp_bytes: u64 = ws.iter().map(|w| w.resp_bytes).sum();
+    let total_disconnects: u64 = ws.iter().map(|w| w.client_disconnects).sum();
     let total_do_req: u64 = dos.iter().map(|d| d.requests).sum();
+    let total_do_err: u64 = dos.iter().map(|d| d.errors).sum();
+    let total_do_duration: f64 = do_usage.iter().map(|d| d.duration_gb_s).sum();
+    let total_do_rows_read: u64 = do_usage.iter().map(|d| d.rows_read).sum();
+    let total_do_rows_written: u64 = do_usage.iter().map(|d| d.rows_written).sum();
     let total_do_bytes: u64 = storage.iter().map(|s| s.bytes).sum();
+    let total_do_exceeded_cpu: u64 = do_usage.iter().map(|d| d.exceeded_cpu).sum();
+    let total_do_exceeded_mem: u64 = do_usage.iter().map(|d| d.exceeded_mem).sum();
+    let total_vec_queried: u64 = vec_q.iter().map(|v| v.queried_dims).sum();
+    let total_vec_stored: u64 = vec_s.iter().map(|v| v.stored_dims).sum();
 
     println!("{}", sty.header("ACCOUNT TOTALS"));
     println!(
@@ -369,10 +618,40 @@ fn print_totals(
             total_do_req as f64 / LIMIT_DO_REQ,
         ),
         (
+            "do duration",
+            format!("{} GB-s", human_num(total_do_duration)),
+            format!("{} GB-s", human_num(LIMIT_DO_DURATION_GB_S)),
+            total_do_duration / LIMIT_DO_DURATION_GB_S,
+        ),
+        (
+            "do rows read",
+            human_count(total_do_rows_read),
+            human_count(LIMIT_DO_ROWS_READ as u64),
+            total_do_rows_read as f64 / LIMIT_DO_ROWS_READ,
+        ),
+        (
+            "do rows written",
+            human_count(total_do_rows_written),
+            human_count(LIMIT_DO_ROWS_WRITTEN as u64),
+            total_do_rows_written as f64 / LIMIT_DO_ROWS_WRITTEN,
+        ),
+        (
             "do storage",
             human_bytes(total_do_bytes),
             human_bytes(LIMIT_DO_BYTES as u64),
             total_do_bytes as f64 / LIMIT_DO_BYTES,
+        ),
+        (
+            "vec queried",
+            human_count(total_vec_queried),
+            human_count(LIMIT_VEC_QUERIED_DIMS as u64),
+            total_vec_queried as f64 / LIMIT_VEC_QUERIED_DIMS,
+        ),
+        (
+            "vec stored",
+            human_count(total_vec_stored),
+            human_count(LIMIT_VEC_STORED_DIMS as u64),
+            total_vec_stored as f64 / LIMIT_VEC_STORED_DIMS,
         ),
         (
             "build mins",
@@ -382,7 +661,7 @@ fn print_totals(
         ),
     ];
 
-    let label_w = items.iter().map(|i| i.0.len()).max().unwrap_or(0);
+    let label_w = items.iter().map(|i| i.0.len()).max().unwrap_or(0).max(18);
     let val_w = items
         .iter()
         .map(|i| i.1.chars().count() + 3 + i.2.chars().count())
@@ -405,18 +684,56 @@ fn print_totals(
         );
     }
 
-    println!(
-        "  {}{}  {}",
-        "errors",
-        " ".repeat(label_w - "errors".len()),
-        sty.dim(&human_count(total_err)),
-    );
-    println!(
-        "  {}{}  {}",
-        "subrequests",
-        " ".repeat(label_w - "subrequests".len()),
-        sty.dim(&human_count(total_sub)),
-    );
+    // Informational counters — not billable, no limit bar.
+    let info_rows: Vec<(&str, String)> = vec![
+        ("wall time", sty.dim(&human_ms(total_wall_ms))),
+        ("resp bytes", sty.dim(&human_bytes(total_resp_bytes))),
+        ("subrequests", sty.dim(&human_count(total_sub))),
+        (
+            "errors",
+            if total_err > 0 {
+                sty.red(&human_count(total_err))
+            } else {
+                sty.dim("0")
+            },
+        ),
+        (
+            "do errors",
+            if total_do_err > 0 {
+                sty.red(&human_count(total_do_err))
+            } else {
+                sty.dim("0")
+            },
+        ),
+        (
+            "do exceeded cpu",
+            if total_do_exceeded_cpu > 0 {
+                sty.red(&human_count(total_do_exceeded_cpu))
+            } else {
+                sty.dim("0")
+            },
+        ),
+        (
+            "do exceeded mem",
+            if total_do_exceeded_mem > 0 {
+                sty.red(&human_count(total_do_exceeded_mem))
+            } else {
+                sty.dim("0")
+            },
+        ),
+        (
+            "client disconnects",
+            if total_disconnects > 0 {
+                sty.dim(&human_count(total_disconnects))
+            } else {
+                sty.dim("0")
+            },
+        ),
+    ];
+    for (label, val) in &info_rows {
+        let pad = " ".repeat(label_w - label.len());
+        println!("  {}{}  {}", label, pad, val);
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -568,21 +885,26 @@ fn print_workers(sty: &Style, ws: &[WorkerRow]) {
     print_table(sty, &cols, &rows);
 }
 
-fn print_dos(sty: &Style, dos: &[DoRow]) {
+fn print_dos(sty: &Style, dos: &[DoRow], do_usage: &[DoUsageRow]) {
     println!("{}", sty.header("DURABLE OBJECTS (invocations)"));
-    if dos.is_empty() {
+    if dos.is_empty() && do_usage.is_empty() {
         println!("  {}", sty.dim("(no invocations in window)"));
         return;
     }
     let total_req: u64 = dos.iter().map(|d| d.requests).sum();
+    let usage_by_script: BTreeMap<&str, &DoUsageRow> =
+        do_usage.iter().map(|u| (u.script.as_str(), u)).collect();
 
     let cols = [
-        Col { header: "script",   align: Align::Left },
-        Col { header: "requests", align: Align::Right },
-        Col { header: "share",    align: Align::Right },
-        Col { header: "p50 (µs)", align: Align::Right },
-        Col { header: "p99 (µs)", align: Align::Right },
-        Col { header: "errors",   align: Align::Right },
+        Col { header: "script",    align: Align::Left },
+        Col { header: "requests",  align: Align::Right },
+        Col { header: "share",     align: Align::Right },
+        Col { header: "duration",  align: Align::Right },
+        Col { header: "rows read", align: Align::Right },
+        Col { header: "rows wrt",  align: Align::Right },
+        Col { header: "p50 (µs)",  align: Align::Right },
+        Col { header: "p99 (µs)",  align: Align::Right },
+        Col { header: "errors",    align: Align::Right },
     ];
 
     let rows: Vec<Vec<String>> = dos
@@ -594,13 +916,75 @@ fn print_dos(sty: &Style, dos: &[DoRow]) {
             } else {
                 sty.dim("0")
             };
+            let usage = usage_by_script.get(d.script.as_str());
+            let duration_cell = usage
+                .map(|u| format!("{} GB-s", human_num(u.duration_gb_s)))
+                .unwrap_or_else(|| sty.dim("—"));
+            let rows_read_cell = usage
+                .map(|u| human_count(u.rows_read))
+                .unwrap_or_else(|| sty.dim("—"));
+            let rows_written_cell = usage
+                .map(|u| human_count(u.rows_written))
+                .unwrap_or_else(|| sty.dim("—"));
             vec![
                 d.script.clone(),
                 human_count(d.requests),
                 sty.dim(&format!("{:.1}%", share * 100.0)),
+                duration_cell,
+                rows_read_cell,
+                rows_written_cell,
                 d.p50.to_string(),
                 d.p99.to_string(),
                 err_cell,
+            ]
+        })
+        .collect();
+
+    print_table(sty, &cols, &rows);
+}
+
+fn print_vectorize(sty: &Style, vec_q: &[VecQueryRow], vec_s: &[VecStorageRow]) {
+    println!("{}", sty.header("VECTORIZE (per-index)"));
+    if vec_q.is_empty() && vec_s.is_empty() {
+        println!("  {}", sty.dim("(no vectorize activity in window)"));
+        return;
+    }
+
+    let storage_by_idx: BTreeMap<&str, &VecStorageRow> =
+        vec_s.iter().map(|s| (s.index.as_str(), s)).collect();
+    let query_by_idx: BTreeMap<&str, &VecQueryRow> =
+        vec_q.iter().map(|q| (q.index.as_str(), q)).collect();
+
+    let mut all_indexes: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    all_indexes.extend(vec_q.iter().map(|q| q.index.as_str()));
+    all_indexes.extend(vec_s.iter().map(|s| s.index.as_str()));
+
+    let cols = [
+        Col { header: "index",        align: Align::Left },
+        Col { header: "vectors",      align: Align::Right },
+        Col { header: "stored dims",  align: Align::Right },
+        Col { header: "queried dims", align: Align::Right },
+        Col { header: "served",       align: Align::Right },
+        Col { header: "query ms",     align: Align::Right },
+    ];
+
+    let rows: Vec<Vec<String>> = all_indexes
+        .into_iter()
+        .map(|idx| {
+            let s = storage_by_idx.get(idx);
+            let q = query_by_idx.get(idx);
+            vec![
+                idx.to_string(),
+                s.map(|s| human_count(s.vector_count))
+                    .unwrap_or_else(|| sty.dim("—")),
+                s.map(|s| human_count(s.stored_dims))
+                    .unwrap_or_else(|| sty.dim("—")),
+                q.map(|q| human_count(q.queried_dims))
+                    .unwrap_or_else(|| sty.dim("0")),
+                q.map(|q| human_count(q.served))
+                    .unwrap_or_else(|| sty.dim("0")),
+                q.map(|q| human_count(q.duration_ms))
+                    .unwrap_or_else(|| sty.dim("0")),
             ]
         })
         .collect();
@@ -663,6 +1047,20 @@ pub(crate) fn human_count(n: u64) -> String {
     }
 }
 
+fn human_num(f: f64) -> String {
+    if f.abs() >= 1e9 {
+        format!("{:.2}B", f / 1e9)
+    } else if f.abs() >= 1e6 {
+        format!("{:.2}M", f / 1e6)
+    } else if f.abs() >= 1e3 {
+        format!("{:.2}k", f / 1e3)
+    } else if f.abs() >= 10.0 {
+        format!("{f:.1}")
+    } else {
+        format!("{f:.2}")
+    }
+}
+
 fn human_ms(ms: u64) -> String {
     let f = ms as f64;
     if f >= 60_000.0 {
@@ -675,11 +1073,13 @@ fn human_ms(ms: u64) -> String {
 }
 
 pub(crate) fn human_bytes(n: u64) -> String {
+    // Decimal units to match Cloudflare's billing convention
+    // (1 GB = 1,000,000,000 bytes).
     let mut f = n as f64;
     let units = ["B", "KB", "MB", "GB", "TB"];
     let mut i = 0;
-    while f >= 1024.0 && i + 1 < units.len() {
-        f /= 1024.0;
+    while f >= 1000.0 && i + 1 < units.len() {
+        f /= 1000.0;
         i += 1;
     }
     format!("{:.1} {}", f, units[i])

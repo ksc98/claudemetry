@@ -287,10 +287,10 @@ pub fn vectorize_summary(index_name: &str) {
         .unwrap_or("—")
         .to_string();
 
-    // 5M is Vectorize v2's standard per-index vector cap.
-    const VEC_CAP: f64 = 5_000_000.0;
+    // https://developers.cloudflare.com/vectorize/platform/limits/
+    const VEC_CAP: f64 = 10_000_000.0;
     let frac = vectors as f64 / VEC_CAP;
-    let cap_str = format!("{} / 5M", human_count(vectors));
+    let cap_str = format!("{} / 10M", human_count(vectors));
     let bar_str = bar(&sty, frac, BAR_WIDTH);
     let pct_str = format_pct(frac);
 

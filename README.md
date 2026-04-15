@@ -346,16 +346,23 @@ wrapping, since terminals already wrap and altering content would break
 
 ### `burnage quota`
 
-Top-down summary of your claudemetry deployment: your DO's state (turns,
-storage, payload bytes) plus the global Vectorize index (vector count,
-dimensions, last mutation). The Vectorize section is fetched via the
-Cloudflare REST API and is best-effort — it prints a hint when
-`CF_API_TOKEN` + `CF_ACCOUNT_ID` aren't set, rather than erroring.
+One combined view of your claudemetry deployment, zooming out:
+
+1. **Your DO** — turns, storage (vs the 5 GiB/DO cap), token totals, payload
+   bytes, active window. Always shown; hits the proxy.
+2. **Cloudflare account totals** — Workers requests/CPU, DO invocations + SQL
+   storage, build minutes, each vs the Workers Paid allocation, over the
+   selected window.
+3. **Vectorize index** — vector count vs the 5M cap, dims, last mutation.
+
+The CF-backed sections (2) and (3) are best-effort — they print a one-line
+hint when `CF_API_TOKEN` + `CF_ACCOUNT_ID` aren't set, so the DO section
+still renders usefully on its own.
 
 ```bash
-burnage quota                 # combined top-down view
-burnage quota do              # drill-down on your DO state only
-burnage quota cf              # full account-wide Workers / DO usage
+burnage quota                 # default window: 30d
+burnage quota month           # calendar month-to-date (UTC)
+burnage quota 24h             # last 24h window for CF totals
 ```
 
 ### `burnage session`
