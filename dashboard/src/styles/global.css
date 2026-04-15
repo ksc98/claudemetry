@@ -138,8 +138,9 @@ table {
   50% { box-shadow: 0 0 0 4px oklch(0.78 0.16 155 / 0); }
 }
 
-/* Scrollbar — thin, dark. */
-::-webkit-scrollbar { width: 10px; height: 10px; }
+/* Scrollbar — thin, dim. */
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 0.08); border-radius: 999px; }
-::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 0.14); }
+::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 0.04); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 0.08); }
+* { scrollbar-width: thin; scrollbar-color: oklch(1 0 0 / 0.04) transparent; }
