@@ -210,6 +210,99 @@ fn fetch_user_count(script: &str) -> Result<Option<u64>> {
     Ok(Some(seen.len() as u64))
 }
 
+/// Append a Vectorize summary to the `burnage quota` top-down view. Requires
+/// CF_API_TOKEN (with Vectorize: Read) + CF_ACCOUNT_ID — without them we print
+/// a one-line hint. Never errors — the broader summary stays useful even if
+/// this section fails.
+pub fn vectorize_summary(index_name: &str) {
+    let sty = Style::new(std::io::stdout().is_terminal());
+    println!("{}", sty.header(&format!("VECTORIZE ({index_name})")));
+
+    let token = match std::env::var("CF_API_TOKEN") {
+        Ok(t) => t,
+        Err(_) => {
+            println!(
+                "  {}",
+                sty.dim("set CF_API_TOKEN + CF_ACCOUNT_ID for index stats")
+            );
+            return;
+        }
+    };
+    let acct = match std::env::var("CF_ACCOUNT_ID") {
+        Ok(a) => a,
+        Err(_) => {
+            println!(
+                "  {}",
+                sty.dim("set CF_API_TOKEN + CF_ACCOUNT_ID for index stats")
+            );
+            return;
+        }
+    };
+
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{acct}/vectorize/v2/indexes/{index_name}/info"
+    );
+    let res = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call();
+    let text = match res {
+        Ok(r) => match r.into_string() {
+            Ok(t) => t,
+            Err(e) => {
+                println!("  {}", sty.dim(&format!("read error: {e}")));
+                return;
+            }
+        },
+        Err(ureq::Error::Status(code, r)) => {
+            let b = r.into_string().unwrap_or_default();
+            println!("  {}", sty.dim(&format!("HTTP {code}: {b}")));
+            return;
+        }
+        Err(e) => {
+            println!("  {}", sty.dim(&format!("fetch error: {e}")));
+            return;
+        }
+    };
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("  {}", sty.dim(&format!("parse error: {e}")));
+            return;
+        }
+    };
+    let result = v
+        .get("result")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let vectors = i64_at(&result, "vectorCount").max(0) as u64;
+    let dims = i64_at(&result, "dimensions").max(0) as u64;
+    let mutation = result
+        .get("processedUpToMutation")
+        .and_then(|x| x.as_str())
+        .unwrap_or("—")
+        .to_string();
+    let processed_at = result
+        .get("processedUpToDatetime")
+        .and_then(|x| x.as_str())
+        .unwrap_or("—")
+        .to_string();
+
+    // 5M is Vectorize v2's standard per-index vector cap.
+    const VEC_CAP: f64 = 5_000_000.0;
+    let frac = vectors as f64 / VEC_CAP;
+    let cap_str = format!("{} / 5M", human_count(vectors));
+    let bar_str = bar(&sty, frac, BAR_WIDTH);
+    let pct_str = format_pct(frac);
+
+    let rows: Vec<(&str, String)> = vec![
+        ("vectors", format!("{cap_str}  {bar_str}  {pct_str}")),
+        ("dims", sty.bold(&dims.to_string())),
+        ("last mut", sty.dim(&mutation)),
+        ("updated", sty.dim(&processed_at)),
+    ];
+    print_rows(&sty, &rows);
+}
+
 fn gh_get(base: &str, token: &str, path: &str) -> Result<Value> {
     let url = format!("{}{}", base.trim_end_matches('/'), path);
     let res = ureq::get(&url)

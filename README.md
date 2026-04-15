@@ -7,40 +7,54 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
 ## Architecture
 
 ```
-    Claude Code                        api.anthropic.com
-         │                                    ▲
-         │ POST /v1/messages                  │ unchanged
-         ▼                                    │
-  ┌──────────────────────────────────────────────┐
-  │  cc-proxy (Rust Worker)                      │
-  │                                              │
-  │   identify         →  GET /oauth/profile     │
-  │                        (cached in KV, 1h TTL)│
-  │                        user_hash =           │
-  │                        sha256(salt ‖ uuid)[:8]│
-  │                                              │
-  │   forward          →  streaming response     │──► client
-  │                                              │
-  │   ctx.wait_until:                            │
-  │     parse SSE usage                          │
-  │     stub = USER_STORE.id_from_name(hash)     │
-  │     stub.fetch("/ingest", JSON record)      ─┼──┐
-  └──────────────────────────────────────────────┘  │
-                                                    ▼
-                        ┌──────────────────────────────┐
-                        │  UserStore Durable Object    │
-                        │  (one instance per user_hash)│
-                        │                              │
-                        │  state.storage().sql()       │
-                        │                              │
-                        │  INSERT INTO transactions    │
-                        │  (tx_id, ts, model,          │
-                        │   input/output/cache tokens, │
-                        │   stop_reason, tools, …)     │
-                        └──────────────────────────────┘
+    Claude Code                                    api.anthropic.com
+         │                                                ▲
+         │ POST /v1/messages                              │ unchanged
+         ▼                                                │
+  ┌──────────────────────────────────────────────────────────┐
+  │  cc-proxy (Rust Worker)                                  │
+  │                                                          │
+  │   identify    →  GET /oauth/profile   (KV cache, 1h TTL) │
+  │                  user_hash = sha256(salt ‖ uuid)[:8]     │
+  │                                                          │
+  │   ── before upstream fetch ────────────────────────────  │
+  │   stub.fetch("/ingest/start")  placeholder row,          │
+  │                                in_flight=1, spinner UI   │
+  │                                                          │
+  │   forward     →  streaming response  ─────────────────► client
+  │                                                          │
+  │   ── after upstream fetch, in ctx.wait_until ──────────  │
+  │   parse SSE usage + text_delta                           │
+  │   stub.fetch("/ingest/finalize")  real metrics +         │
+  │                                   user_text + asst_text  │
+  │   embed(user+asst) → VECTORIZE.upsert({hash}:{tx_id})    │
+  └──────────────────────────────────────────────────────────┘
+                       │                              │
+                       ▼                              ▼
+      ┌─────────────────────────────────┐  ┌─────────────────────────┐
+      │  UserStore Durable Object       │  │  Vectorize              │
+      │  (one instance per user_hash)   │  │  (global index,         │
+      │                                 │  │   filtered by user_hash)│
+      │  transactions + FTS5 virtual    │  │                         │
+      │    table (triggers mirror       │  │  claudemetry-turns,     │
+      │    user_text + assistant_text)  │  │  bge-base-en-v1.5       │
+      │  search_rate_limit counter      │  │  768-dim cosine         │
+      │  session_ends                   │  │                         │
+      │                                 │  │  search queries         │
+      │  POST /search orchestrates      ├─►│  filter {user_hash}     │
+      │  FTS + VECTORIZE.query + RRF    │  │  topK → tx_ids          │
+      └─────────────────────────────────┘  └─────────────────────────┘
 ```
 
-Each unique user_hash gets its own private SQLite database. No provisioning — the first request with a given hash materializes the DO, runs `CREATE TABLE IF NOT EXISTS`, and inserts the row. Two users share no table, no index, no memory space.
+Each unique user_hash gets its own private SQLite database. No provisioning —
+the first request with a given hash materializes the DO, runs
+`CREATE TABLE IF NOT EXISTS`, and inserts the row. Two users share no table,
+no index, no memory space.
+
+Vectorize is a single global index; isolation is enforced by a
+`{user_hash}:` id prefix + a server-side metadata filter on every query.
+FTS5 is trivially isolated (lives inside each user's DO); Vectorize trades
+hard isolation for semantic recall — the two indexes complement each other.
 
 ## Requirements
 
@@ -97,6 +111,14 @@ Both workers share a single KV namespace (binding name `SESSION`) for the OAuth-
 ```bash
 npx wrangler kv namespace create claudemetry-session
 # copy the id into the [[kv_namespaces]] block in both configs
+```
+
+Provision the Vectorize index used for semantic search. This is idempotent
+and requires a CF API token with the `Vectorize: Edit` permission:
+
+```bash
+just vectorize-create       # creates claudemetry-turns (768-dim cosine)
+                            # + user_hash metadata index
 ```
 
 Then point your client at whichever URL you ended up with:
@@ -174,6 +196,9 @@ than 5 min to `stop_reason = 'error'`.
 Hybrid FTS5 + Vectorize lookup over `user_text` and `assistant_text`. `mode`
 defaults to `hybrid`; results from both indexes are merged via reciprocal-rank
 fusion (k=60) and `match_source` tags each hit as `fts`, `vector`, or `both`.
+Orchestration lives in the per-user DO (`UserStore::search`), so the proxy's
+`/_cm/search` and the dashboard's `/api/search` are both thin forwarders over
+the same implementation.
 
 ```bash
 curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/search \
@@ -186,10 +211,42 @@ curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/search \
   -d '{"q":"auth flow","mode":"hybrid","limit":20}'
 ```
 
+Response shape (success):
+
+```json
+{
+  "mode": "hybrid",
+  "results": [
+    {
+      "tx_id": "inflight-…",
+      "ts": 1776251781393,
+      "session_id": "…",
+      "model": "claude-opus-4-6",
+      "user_snip": "…<mark>foo</mark>…",
+      "asst_snip": "…<mark>bar</mark>…",
+      "score": 0.033,
+      "match_source": "both"
+    }
+  ]
+}
+```
+
 Isolation for Vectorize is enforced two ways: each vector is keyed
 `{user_hash}:{tx_id}` and its `user_hash` metadata is used as a server-side
 `filter` on every query. FTS5 is trivially isolated — it lives inside each
 user's own Durable Object.
+
+**Rate limit**: 120 req/min per user (fixed 60s window). Counter lives in the
+DO's SQLite (`search_rate_limit` table), so it's strongly consistent without
+a KV round-trip. Over-quota responses are `429` with
+`{"error":"rate_limited","retry_after_seconds":N}`. The write-path embed (one
+call per turn during `/ingest/finalize`) is **not** rate-limited — turns are
+naturally paced by the upstream Anthropic API.
+
+**Dashboard UI**: the dashboard home page (behind CF Access) has a search
+input that calls `/api/search` and renders results with FTS5 `<mark>` snippet
+highlights, a keyword/semantic/both badge per hit, and a `/` keyboard
+shortcut to focus the input.
 
 Provision the Vectorize index once before first deploy:
 
@@ -212,6 +269,11 @@ curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/stats
 # All raw rows from your DO (newest first)
 curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/recent
 
+# Full-text + semantic search over your user_text / assistant_text.
+# mode = fts | vector | hybrid (default). 120 req/min per user.
+curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/search \
+  -d '{"q":"parse_sse_usage","mode":"hybrid","limit":20}'
+
 # Generic SQL exec — backs `burnage shell`. Optional `hash` overrides the
 # target DO (used for cross-DO inspection / data migration).
 curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/admin/sql \
@@ -220,9 +282,60 @@ curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/admin/sql \
 
 These are bearer-gated and never cross identities unless you ask via `hash`.
 
-## `burnage shell`
+## `burnage` CLI
 
-Interactive SQL REPL + headless executor over `/_cm/admin/sql`. Built on crossterm — no readline, comfy-table, or rustyline pull-ins.
+Thin cross-platform CLI over the `/_cm/*` endpoints, installed via
+`just burnage-install` (bakes your `$DOMAIN` in as the default `--url`).
+
+```bash
+burnage whoami                # your stable user_hash + email
+burnage stats                 # aggregate counts + token totals
+burnage recent                # recent transactions (newest first)
+```
+
+### `burnage search`
+
+Headless wrapper over `/_cm/search`. Output auto-detects: styled table on a
+tty (with `<mark>` snippet highlights rendered as bold yellow ANSI), raw JSON
+when stdout is piped.
+
+```bash
+burnage search "parse_sse_usage"                 # hybrid (default)
+burnage search "auth flow" --mode fts            # keyword-only (bm25)
+burnage search "OAuth debugging" --mode vector   # semantic-only (cosine)
+burnage search "foo" --limit 50 --format json    # override table auto-detect
+```
+
+Each table row shows `match_source` (keyword / semantic / both), model,
+relative timestamp, score, and two snippets — `you:` (last user message) and
+`ast:` (assistant response) — plus the full `tx_id` and `session_id` so you
+can jump to the turn in the dashboard.
+
+### `burnage quota`
+
+Top-down summary of your claudemetry deployment: your DO's state (turns,
+storage, payload bytes) plus the global Vectorize index (vector count,
+dimensions, last mutation). The Vectorize section is fetched via the
+Cloudflare REST API and is best-effort — it prints a hint when
+`CF_API_TOKEN` + `CF_ACCOUNT_ID` aren't set, rather than erroring.
+
+```bash
+burnage quota                 # combined top-down view
+burnage quota do              # drill-down on your DO state only
+burnage quota cf              # full account-wide Workers / DO usage
+```
+
+### `burnage session`
+
+```bash
+burnage session end <id>      # mark a session as ended (sets ended_at)
+burnage session ends          # list all recorded session end timestamps
+```
+
+### `burnage shell`
+
+Interactive SQL REPL + headless executor over `/_cm/admin/sql`. Built on
+crossterm — no readline, comfy-table, or rustyline pull-ins.
 
 ```bash
 burnage shell                          # REPL against your own DO
@@ -232,28 +345,49 @@ burnage shell -f migrate.sql
 echo "SELECT model FROM transactions" | burnage shell
 ```
 
-Output auto-detects: pretty table on a tty, JSON when stdout is piped. Override with `--format {table,json,tsv}`.
+Output auto-detects: pretty table on a tty, JSON when stdout is piped. Override
+with `--format {table,json,tsv}`.
 
-REPL niceties: history at `~/.cache/burnage/shell_history`, arrow-key navigation, Home/End/Ctrl-A/E/U/K/L, Ctrl-C cancels current input, Ctrl-D exits on empty buffer. Dot commands: `.tables`, `.schema [name]`, `.hash <16-hex>|-`, `.whoami`, `.quit`.
+REPL niceties: history at `~/.cache/burnage/shell_history`, arrow-key
+navigation, Home/End/Ctrl-A/E/U/K/L, Ctrl-C cancels current input, Ctrl-D
+exits on empty buffer. Dot commands: `.tables`, `.schema [name]`,
+`.hash <16-hex>|-`, `.whoami`, `.quit`.
 
 ## What gets logged (console)
 
-Each transaction also emits two structured JSON log lines to `wrangler tail`:
+Each transaction emits two structured JSON log lines to `wrangler tail`:
 
 ```json
 {"dir":"req","ts":...,"method":"POST","url":"...","user_hash":"0203…","session_id":"…","body_len":1530}
-{"dir":"resp","ts":...,"status":200,"elapsed_ms":777,"model":"claude-opus-4-6","input_tokens":443,"output_tokens":32,"cache_read":262754,"cache_creation":951,"stop_reason":"end_turn","tx_id":"msg_…","body_len":2472}
+{"dir":"resp","ts":...,"status":200,"elapsed_ms":777,"model":"claude-opus-4-6","input_tokens":443,"output_tokens":32,"cache_read":262754,"cache_creation":951,"stop_reason":"end_turn","tx_id":"inflight-…","body_len":2472}
 ```
 
-`authorization` and `x-api-key` values are never written to logs. The raw prompt/response bodies are not logged in the deployed worker either — they're parsed for metrics (and for the `user_text` / `assistant_text` search columns) and then discarded.
+Best-effort operations on the finalize path (embedding + Vectorize upsert)
+log their failure modes with a `stage` field so silent failures surface
+immediately in `wrangler tail`:
+
+```json
+{"dir":"embed_err","stage":"binding","err":"…"}                   // env.AI not bound
+{"dir":"embed_err","stage":"run","err":"AiError: 5006: …"}        // Workers AI rejection
+{"dir":"embed_err","stage":"shape","body":{…}}                    // unexpected response shape
+{"dir":"embed_err","stage":"dims","got":384,"want":768}           // dimension mismatch
+{"dir":"vectorize_upsert_err","err":"…"}                          // VECTORIZE.upsert failed
+```
+
+`authorization` and `x-api-key` values are never written to logs. The raw
+prompt/response bodies aren't logged either — they're parsed for metrics (and
+for the `user_text` / `assistant_text` search columns) and then discarded.
 
 ## Layout
 
-- `src/lib.rs` — fetch handler, `UserStore` Durable Object, SSE parser, user-hash derivation, admin probes
-- `wrangler.toml` — proxy worker config (Durable Object binding + SQLite migration, observability on)
+- `src/lib.rs` — fetch handler, two-phase ingest (`/ingest/start` + `/finalize`), `UserStore` Durable Object with FTS5 + RRF search orchestrator, SSE parser, Vectorize wrapper (via `js_sys::Reflect` since worker 0.8 has no first-class binding), user-hash derivation, admin probes, `/_cm/search`
+- `wrangler.toml` — proxy worker config: DO + SQLite migration, `[ai]` binding, `[[vectorize]]` binding for the `claudemetry-turns` index, observability on
+- `burnage/` — cross-platform CLI (`whoami`, `stats`, `recent`, `search`, `quota`, `session`, `shell`)
 - `dashboard/` — Astro 6 + React dashboard worker, served behind Cloudflare Access
+  - `src/pages/api/search.ts` — thin forwarder: CF Access email → `user_hash` → DO `/search`
+  - `src/components/SearchBox.tsx` — search input with `/` focus hotkey, mode switch, RRF-merged results
 - `scripts/cf-access.sh` — idempotent provisioner for the Access apps/policies (`just cf-access`)
-- `justfile` — `local`, `local-tee`, `build`, `login`, `deploy`, `tail`, `clean`, `dashboard-dev`, `dashboard-deploy`, `dashboard-tail`, `deploy-all`, `cf-access`
+- `justfile` — `local`, `local-tee`, `build`, `login`, `deploy`, `tail`, `clean`, `dashboard-dev`, `dashboard-deploy`, `dashboard-tail`, `deploy-all`, `cf-access`, `vectorize-create`, `vectorize-info`, `burnage-install`
 
 ## Notes on trust
 
