@@ -981,6 +981,7 @@ impl UserStore {
         let mut embed_errors = 0i64;
         let mut upsert_errors = 0i64;
         let mut oldest_ts = before_ts;
+        let mut processed: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
 
         for row in &rows {
             let tx_id = row
@@ -1002,13 +1003,24 @@ impl UserStore {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let combined = format!("{}\n---\n{}", ut, at);
+            let text_len = combined.len() as i64;
             if combined.trim().len() <= 3 {
                 skipped_empty += 1;
+                processed.push(json!({
+                    "tx_id": tx_id,
+                    "ts": ts,
+                    "status": "skipped_empty",
+                    "text_len": text_len,
+                }));
                 continue;
             }
-            match embed_text(&self.env, &combined).await {
+            let embed_start = Date::now().as_millis() as i64;
+            let embed_result = embed_text(&self.env, &combined).await;
+            let embed_ms = Date::now().as_millis() as i64 - embed_start;
+            match embed_result {
                 Some(vec) => {
-                    match vectorize_upsert(
+                    let upsert_start = Date::now().as_millis() as i64;
+                    let upsert_result = vectorize_upsert(
                         &self.env,
                         &user_hash,
                         &tx_id,
@@ -1016,13 +1028,44 @@ impl UserStore {
                         ts,
                         &vec,
                     )
-                    .await
-                    {
-                        Ok(()) => upserted += 1,
-                        Err(_) => upsert_errors += 1,
+                    .await;
+                    let upsert_ms = Date::now().as_millis() as i64 - upsert_start;
+                    match upsert_result {
+                        Ok(()) => {
+                            upserted += 1;
+                            processed.push(json!({
+                                "tx_id": tx_id,
+                                "ts": ts,
+                                "status": "upserted",
+                                "text_len": text_len,
+                                "embed_ms": embed_ms,
+                                "upsert_ms": upsert_ms,
+                            }));
+                        }
+                        Err(e) => {
+                            upsert_errors += 1;
+                            processed.push(json!({
+                                "tx_id": tx_id,
+                                "ts": ts,
+                                "status": "upsert_err",
+                                "text_len": text_len,
+                                "embed_ms": embed_ms,
+                                "upsert_ms": upsert_ms,
+                                "err": e,
+                            }));
+                        }
                     }
                 }
-                None => embed_errors += 1,
+                None => {
+                    embed_errors += 1;
+                    processed.push(json!({
+                        "tx_id": tx_id,
+                        "ts": ts,
+                        "status": "embed_err",
+                        "text_len": text_len,
+                        "embed_ms": embed_ms,
+                    }));
+                }
             }
         }
 
@@ -1045,6 +1088,7 @@ impl UserStore {
             "oldest_ts": oldest_ts,
             "next_before_ts": next_before_ts,
             "done": done,
+            "rows": processed,
         }))
     }
 
