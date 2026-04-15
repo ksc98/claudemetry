@@ -1,0 +1,11 @@
+[tools]
+rust = "stable"
+node = "22"
+pnpm = "10"
+just = "1"
+
+# Make cargo-installed binaries (worker-build, burnage, …) resolvable
+# whenever the shell is inside this repo, without requiring ~/.cargo/bin
+# on the user's global PATH.
+[env]
+_.path = ["~/.cargo/bin"]

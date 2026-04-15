@@ -43,9 +43,16 @@ Each unique user_hash gets its own private SQLite database. No provisioning — 
 
 ## Requirements
 
-- Rust with the `wasm32-unknown-unknown` target
-- Node (for `npx wrangler`)
-- [`just`](https://github.com/casey/just)
+Toolchain versions are pinned in `mise.toml`. With [mise](https://github.com/jdx/mise) installed and activated, bootstrap a fresh clone with:
+
+```bash
+mise trust          # one-time, approves this repo's mise.toml
+just setup-mise     # installs rust/node/pnpm/just, wasm target, and worker-build
+```
+
+That's everything needed to run `just local` or `just deploy`. `worker-build` is a cargo-installed binary (lives in `~/.cargo/bin`, not pinned in `mise.toml`) — `mise.toml`'s `[env]` block puts `~/.cargo/bin` on PATH whenever you're inside the repo, so the setup is fully portable and doesn't rely on your global shell config.
+
+Without mise, install the equivalents manually: Rust (with `wasm32-unknown-unknown`), Node ≥22.12, pnpm, [`just`](https://github.com/casey/just), and `cargo install worker-build`.
 
 ## Run locally
 
