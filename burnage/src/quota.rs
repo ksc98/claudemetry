@@ -48,9 +48,21 @@ pub(crate) const BAR_WIDTH: usize = 24;
 // allocation). Used for the single-DO storage bar in `usage.rs`.
 pub(crate) const DO_STORAGE_LIMIT: f64 = 10.0e9;
 
-const WORKERS_Q: &str = r#"query W($acct:String!,$from:Time!,$to:Time!){
+// Single batched query: all 9 datasets in one HTTP round-trip via GraphQL
+// field aliases. Previously this was 9 parallel POSTs; CF doesn't do HTTP/2
+// on this endpoint (from a ureq 2.x client), so each parallel call still
+// paid its own TLS handshake. One merged document → one handshake → ~3×
+// wall-time drop. Same aggregator (`aiInferenceAdaptiveGroups`) appears
+// twice under different aliases with different filter inputs — exactly
+// what aliases are for.
+const BATCH_Q: &str = r#"query Q(
+  $acct: String!,
+  $from: Time!,
+  $to: Time!,
+  $todayFrom: Time!
+){
   viewer{accounts(filter:{accountTag:$acct}){
-    workersInvocationsAdaptive(
+    workers: workersInvocationsAdaptive(
       filter:{datetime_geq:$from,datetime_leq:$to},
       limit:1000
     ){
@@ -58,12 +70,7 @@ const WORKERS_Q: &str = r#"query W($acct:String!,$from:Time!,$to:Time!){
       quantiles{cpuTimeP50 cpuTimeP99}
       dimensions{scriptName}
     }
-  }}
-}"#;
-
-const DO_INV_Q: &str = r#"query D($acct:String!,$from:Time!,$to:Time!){
-  viewer{accounts(filter:{accountTag:$acct}){
-    durableObjectsInvocationsAdaptiveGroups(
+    doInv: durableObjectsInvocationsAdaptiveGroups(
       filter:{datetime_geq:$from,datetime_leq:$to},
       limit:1000
     ){
@@ -71,24 +78,14 @@ const DO_INV_Q: &str = r#"query D($acct:String!,$from:Time!,$to:Time!){
       quantiles{wallTimeP50 wallTimeP99}
       dimensions{scriptName namespaceId}
     }
-  }}
-}"#;
-
-const DO_PERIODIC_Q: &str = r#"query P($acct:String!,$from:Time!,$to:Time!){
-  viewer{accounts(filter:{accountTag:$acct}){
-    durableObjectsPeriodicGroups(
+    doPeriodic: durableObjectsPeriodicGroups(
       filter:{datetime_geq:$from,datetime_leq:$to},
       limit:10000
     ){
       sum{duration cpuTime activeTime rowsRead rowsWritten exceededCpuErrors exceededMemoryErrors subrequests}
       dimensions{namespaceId}
     }
-  }}
-}"#;
-
-const DO_STORAGE_Q: &str = r#"query S($acct:String!,$from:Time!,$to:Time!){
-  viewer{accounts(filter:{accountTag:$acct}){
-    durableObjectsSqlStorageGroups(
+    doStorage: durableObjectsSqlStorageGroups(
       filter:{datetime_geq:$from,datetime_leq:$to},
       limit:1000,
       orderBy:[datetime_DESC]
@@ -96,24 +93,14 @@ const DO_STORAGE_Q: &str = r#"query S($acct:String!,$from:Time!,$to:Time!){
       max{storedBytes}
       dimensions{namespaceId datetime}
     }
-  }}
-}"#;
-
-const VEC_QUERIES_Q: &str = r#"query VQ($acct:String!,$from:Time!,$to:Time!){
-  viewer{accounts(filter:{accountTag:$acct}){
-    vectorizeV2QueriesAdaptiveGroups(
+    vecQueries: vectorizeV2QueriesAdaptiveGroups(
       filter:{datetime_geq:$from,datetime_leq:$to},
       limit:1000
     ){
       sum{queriedVectorDimensions servedVectorCount requestDurationMs}
       dimensions{indexName}
     }
-  }}
-}"#;
-
-const VEC_STORAGE_Q: &str = r#"query VS($acct:String!,$from:Time!,$to:Time!){
-  viewer{accounts(filter:{accountTag:$acct}){
-    vectorizeV2StorageAdaptiveGroups(
+    vecStorage: vectorizeV2StorageAdaptiveGroups(
       filter:{datetime_geq:$from,datetime_leq:$to},
       limit:1000,
       orderBy:[datetime_DESC]
@@ -121,24 +108,22 @@ const VEC_STORAGE_Q: &str = r#"query VS($acct:String!,$from:Time!,$to:Time!){
       max{storedVectorDimensions vectorCount}
       dimensions{indexName datetime}
     }
-  }}
-}"#;
-
-const BUILD_Q: &str = r#"query B($acct:String!,$from:Time!,$to:Time!){
-  viewer{accounts(filter:{accountTag:$acct}){
-    workersBuildsBuildMinutesAdaptiveGroups(
+    builds: workersBuildsBuildMinutesAdaptiveGroups(
       filter:{datetime_geq:$from,datetime_leq:$to},
       limit:1000
     ){
       sum{buildMinutes}
     }
-  }}
-}"#;
-
-const AI_Q: &str = r#"query AI($acct:String!,$from:Time!,$to:Time!){
-  viewer{accounts(filter:{accountTag:$acct}){
-    aiInferenceAdaptiveGroups(
+    aiWindow: aiInferenceAdaptiveGroups(
       filter:{datetime_geq:$from,datetime_leq:$to},
+      limit:1000
+    ){
+      sum{totalNeurons}
+      count
+      dimensions{modelId}
+    }
+    aiToday: aiInferenceAdaptiveGroups(
+      filter:{datetime_geq:$todayFrom,datetime_leq:$to},
       limit:1000
     ){
       sum{totalNeurons}
@@ -170,62 +155,45 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     };
 
     let (from, to, label) = resolve_window(&args.window)?;
-    let vars = json!({ "acct": account_id, "from": from, "to": to });
-
-    // Workers AI resets at 00:00 UTC, so a separate "today" query tracks
-    // the only window that actually matters for the daily allocation.
+    // Workers AI resets at 00:00 UTC, so the "today" slice inside the same
+    // batched query uses its own `$todayFrom`.
     let today_from = format!(
         "{:04}-{:02}-{:02}T00:00:00Z",
         Utc::now().year(),
         Utc::now().month(),
         Utc::now().day()
     );
-    let ai_today_vars = json!({
+    let vars = json!({
         "acct": account_id,
-        "from": today_from,
+        "from": from,
         "to": to,
+        "todayFrom": today_from,
     });
 
-    // Fire all 9 GraphQL queries in parallel — they have no data dependency
-    // on each other. ureq is blocking, so one OS thread per request. Wall
-    // time drops from sum-of-latencies to max-of-latencies (~500ms).
-    let token = api_token.clone();
-    let make_gql = |query: &'static str, v: Value| -> crate::parallel::Task<Value> {
-        let t = token.clone();
-        Box::new(move || gql(&t, query, &v))
+    // One HTTP round-trip for all 9 datasets. CF returns the aliased fields
+    // side-by-side under `data.viewer.accounts[0]`.
+    let batch = gql(&api_token, BATCH_Q, &vars)?;
+    let acct = batch
+        .pointer("/data/viewer/accounts/0")
+        .ok_or_else(|| anyhow!("unexpected GraphQL response shape: {batch}"))?;
+    let empty: Vec<Value> = Vec::new();
+    let pick = |k: &str| -> &[Value] {
+        acct.get(k)
+            .and_then(|x| x.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&empty)
     };
-    let results = crate::parallel::scatter(vec![
-        make_gql(WORKERS_Q, vars.clone()),
-        make_gql(DO_INV_Q, vars.clone()),
-        make_gql(DO_PERIODIC_Q, vars.clone()),
-        make_gql(DO_STORAGE_Q, vars.clone()),
-        make_gql(VEC_QUERIES_Q, vars.clone()),
-        make_gql(VEC_STORAGE_Q, vars.clone()),
-        make_gql(BUILD_Q, vars.clone()),
-        make_gql(AI_Q, vars.clone()),
-        make_gql(AI_Q, ai_today_vars),
-    ]);
-    let mut it = results.into_iter();
-    let workers = it.next().unwrap()?;
-    let do_inv = it.next().unwrap()?;
-    let do_periodic = it.next().unwrap()?;
-    let do_storage = it.next().unwrap()?;
-    let vec_queries = it.next().unwrap()?;
-    let vec_storage = it.next().unwrap()?;
-    let builds = it.next().unwrap()?;
-    let ai = it.next().unwrap()?;
-    let ai_today = it.next().unwrap()?;
 
-    let ws = aggregate_workers(&workers);
-    let dos = aggregate_dos(&do_inv);
-    let ns_map = namespace_script_map(&do_inv);
-    let do_usage = aggregate_do_periodic(&do_periodic, &ns_map);
-    let storage = aggregate_storage(&do_storage, &ns_map);
-    let vec_q = aggregate_vec_queries(&vec_queries);
-    let vec_s = aggregate_vec_storage(&vec_storage);
-    let build_min = sum_build_minutes(&builds);
-    let ai_rows = aggregate_ai(&ai);
-    let ai_today_rows = aggregate_ai(&ai_today);
+    let ws = aggregate_workers(pick("workers"));
+    let dos = aggregate_dos(pick("doInv"));
+    let ns_map = namespace_script_map(pick("doInv"));
+    let do_usage = aggregate_do_periodic(pick("doPeriodic"), &ns_map);
+    let storage = aggregate_storage(pick("doStorage"), &ns_map);
+    let vec_q = aggregate_vec_queries(pick("vecQueries"));
+    let vec_s = aggregate_vec_storage(pick("vecStorage"));
+    let build_min = sum_build_minutes(pick("builds"));
+    let ai_rows = aggregate_ai(pick("aiWindow"));
+    let ai_today_rows = aggregate_ai(pick("aiToday"));
 
     println!(
         "{} {} → {} {}",
@@ -326,12 +294,7 @@ struct WorkerRow {
     p99: u64,
 }
 
-fn aggregate_workers(v: &Value) -> Vec<WorkerRow> {
-    let rows = account(v)
-        .and_then(|a| a.get("workersInvocationsAdaptive"))
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
+fn aggregate_workers(rows: &[Value]) -> Vec<WorkerRow> {
     let mut by_script: BTreeMap<String, WorkerRow> = BTreeMap::new();
     for r in rows {
         let script = r
@@ -352,16 +315,16 @@ fn aggregate_workers(v: &Value) -> Vec<WorkerRow> {
             p50: 0,
             p99: 0,
         });
-        entry.requests += u64_at(&r, "/sum/requests");
-        entry.errors += u64_at(&r, "/sum/errors");
-        entry.subreq += u64_at(&r, "/sum/subrequests");
-        entry.cpu_us += u64_at(&r, "/sum/cpuTimeUs");
-        entry.wall_us += u64_at(&r, "/sum/wallTime");
-        entry.duration_gb_s += f64_at(&r, "/sum/duration");
-        entry.resp_bytes += u64_at(&r, "/sum/responseBodySize");
-        entry.client_disconnects += u64_at(&r, "/sum/clientDisconnects");
-        entry.p50 = entry.p50.max(u64_at(&r, "/quantiles/cpuTimeP50"));
-        entry.p99 = entry.p99.max(u64_at(&r, "/quantiles/cpuTimeP99"));
+        entry.requests += u64_at(r, "/sum/requests");
+        entry.errors += u64_at(r, "/sum/errors");
+        entry.subreq += u64_at(r, "/sum/subrequests");
+        entry.cpu_us += u64_at(r, "/sum/cpuTimeUs");
+        entry.wall_us += u64_at(r, "/sum/wallTime");
+        entry.duration_gb_s += f64_at(r, "/sum/duration");
+        entry.resp_bytes += u64_at(r, "/sum/responseBodySize");
+        entry.client_disconnects += u64_at(r, "/sum/clientDisconnects");
+        entry.p50 = entry.p50.max(u64_at(r, "/quantiles/cpuTimeP50"));
+        entry.p99 = entry.p99.max(u64_at(r, "/quantiles/cpuTimeP99"));
     }
     let mut out: Vec<_> = by_script.into_values().collect();
     out.sort_by(|a, b| b.requests.cmp(&a.requests));
@@ -376,12 +339,7 @@ struct DoRow {
     p99: u64,
 }
 
-fn aggregate_dos(v: &Value) -> Vec<DoRow> {
-    let rows = account(v)
-        .and_then(|a| a.get("durableObjectsInvocationsAdaptiveGroups"))
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
+fn aggregate_dos(rows: &[Value]) -> Vec<DoRow> {
     let mut by_script: BTreeMap<String, DoRow> = BTreeMap::new();
     for r in rows {
         let script = r
@@ -396,10 +354,10 @@ fn aggregate_dos(v: &Value) -> Vec<DoRow> {
             p50: 0,
             p99: 0,
         });
-        entry.requests += u64_at(&r, "/sum/requests");
-        entry.errors += u64_at(&r, "/sum/errors");
-        entry.p50 = entry.p50.max(u64_at(&r, "/quantiles/wallTimeP50"));
-        entry.p99 = entry.p99.max(u64_at(&r, "/quantiles/wallTimeP99"));
+        entry.requests += u64_at(r, "/sum/requests");
+        entry.errors += u64_at(r, "/sum/errors");
+        entry.p50 = entry.p50.max(u64_at(r, "/quantiles/wallTimeP50"));
+        entry.p99 = entry.p99.max(u64_at(r, "/quantiles/wallTimeP99"));
     }
     let mut out: Vec<_> = by_script.into_values().collect();
     out.sort_by(|a, b| b.requests.cmp(&a.requests));
@@ -420,14 +378,9 @@ struct DoUsageRow {
 }
 
 fn aggregate_do_periodic(
-    v: &Value,
+    rows: &[Value],
     ns_map: &BTreeMap<String, String>,
 ) -> Vec<DoUsageRow> {
-    let rows = account(v)
-        .and_then(|a| a.get("durableObjectsPeriodicGroups"))
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
     let mut by_script: BTreeMap<String, DoUsageRow> = BTreeMap::new();
     for r in rows {
         let ns = r
@@ -446,14 +399,14 @@ fn aggregate_do_periodic(
             script,
             ..Default::default()
         });
-        entry.duration_gb_s += f64_at(&r, "/sum/duration");
-        entry.cpu_us += u64_at(&r, "/sum/cpuTime");
-        entry.active_us += u64_at(&r, "/sum/activeTime");
-        entry.rows_read += u64_at(&r, "/sum/rowsRead");
-        entry.rows_written += u64_at(&r, "/sum/rowsWritten");
-        entry.subrequests += u64_at(&r, "/sum/subrequests");
-        entry.exceeded_cpu += u64_at(&r, "/sum/exceededCpuErrors");
-        entry.exceeded_mem += u64_at(&r, "/sum/exceededMemoryErrors");
+        entry.duration_gb_s += f64_at(r, "/sum/duration");
+        entry.cpu_us += u64_at(r, "/sum/cpuTime");
+        entry.active_us += u64_at(r, "/sum/activeTime");
+        entry.rows_read += u64_at(r, "/sum/rowsRead");
+        entry.rows_written += u64_at(r, "/sum/rowsWritten");
+        entry.subrequests += u64_at(r, "/sum/subrequests");
+        entry.exceeded_cpu += u64_at(r, "/sum/exceededCpuErrors");
+        entry.exceeded_mem += u64_at(r, "/sum/exceededMemoryErrors");
     }
     let mut out: Vec<_> = by_script.into_values().collect();
     out.sort_by(|a, b| {
@@ -471,12 +424,7 @@ struct VecQueryRow {
     duration_ms: u64,
 }
 
-fn aggregate_vec_queries(v: &Value) -> Vec<VecQueryRow> {
-    let rows = account(v)
-        .and_then(|a| a.get("vectorizeV2QueriesAdaptiveGroups"))
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
+fn aggregate_vec_queries(rows: &[Value]) -> Vec<VecQueryRow> {
     let mut by_index: BTreeMap<String, VecQueryRow> = BTreeMap::new();
     for r in rows {
         let index = r
@@ -490,9 +438,9 @@ fn aggregate_vec_queries(v: &Value) -> Vec<VecQueryRow> {
             served: 0,
             duration_ms: 0,
         });
-        entry.queried_dims += u64_at(&r, "/sum/queriedVectorDimensions");
-        entry.served += u64_at(&r, "/sum/servedVectorCount");
-        entry.duration_ms += u64_at(&r, "/sum/requestDurationMs");
+        entry.queried_dims += u64_at(r, "/sum/queriedVectorDimensions");
+        entry.served += u64_at(r, "/sum/servedVectorCount");
+        entry.duration_ms += u64_at(r, "/sum/requestDurationMs");
     }
     let mut out: Vec<_> = by_index.into_values().collect();
     out.sort_by(|a, b| b.queried_dims.cmp(&a.queried_dims));
@@ -505,12 +453,7 @@ struct VecStorageRow {
     vector_count: u64,
 }
 
-fn aggregate_vec_storage(v: &Value) -> Vec<VecStorageRow> {
-    let rows = account(v)
-        .and_then(|a| a.get("vectorizeV2StorageAdaptiveGroups"))
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
+fn aggregate_vec_storage(rows: &[Value]) -> Vec<VecStorageRow> {
     let mut latest: BTreeMap<String, (String, u64, u64)> = BTreeMap::new();
     for r in rows {
         let index = r
@@ -523,8 +466,8 @@ fn aggregate_vec_storage(v: &Value) -> Vec<VecStorageRow> {
             .and_then(|x| x.as_str())
             .unwrap_or_default()
             .to_string();
-        let dims = u64_at(&r, "/max/storedVectorDimensions");
-        let vc = u64_at(&r, "/max/vectorCount");
+        let dims = u64_at(r, "/max/storedVectorDimensions");
+        let vc = u64_at(r, "/max/vectorCount");
         latest
             .entry(index)
             .and_modify(|(cur_dt, cur_d, cur_v)| {
@@ -546,12 +489,7 @@ fn aggregate_vec_storage(v: &Value) -> Vec<VecStorageRow> {
         .collect()
 }
 
-fn namespace_script_map(v: &Value) -> BTreeMap<String, String> {
-    let rows = account(v)
-        .and_then(|a| a.get("durableObjectsInvocationsAdaptiveGroups"))
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
+fn namespace_script_map(rows: &[Value]) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     for r in rows {
         let ns = r
@@ -576,12 +514,7 @@ struct StorageRow {
     bytes: u64,
 }
 
-fn aggregate_storage(v: &Value, ns_map: &BTreeMap<String, String>) -> Vec<StorageRow> {
-    let rows = account(v)
-        .and_then(|a| a.get("durableObjectsSqlStorageGroups"))
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
+fn aggregate_storage(rows: &[Value], ns_map: &BTreeMap<String, String>) -> Vec<StorageRow> {
     let mut latest: BTreeMap<String, (String, u64)> = BTreeMap::new();
     for r in rows {
         let ns = r
@@ -594,7 +527,7 @@ fn aggregate_storage(v: &Value, ns_map: &BTreeMap<String, String>) -> Vec<Storag
             .and_then(|x| x.as_str())
             .unwrap_or_default()
             .to_string();
-        let bytes = u64_at(&r, "/max/storedBytes");
+        let bytes = u64_at(r, "/max/storedBytes");
         latest
             .entry(ns)
             .and_modify(|(cur_dt, cur_b)| {
@@ -620,12 +553,7 @@ struct AiRow {
     neurons: f64,
 }
 
-fn aggregate_ai(v: &Value) -> Vec<AiRow> {
-    let rows = account(v)
-        .and_then(|a| a.get("aiInferenceAdaptiveGroups"))
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
+fn aggregate_ai(rows: &[Value]) -> Vec<AiRow> {
     let mut by_model: BTreeMap<String, AiRow> = BTreeMap::new();
     for r in rows {
         let model = r
@@ -638,8 +566,8 @@ fn aggregate_ai(v: &Value) -> Vec<AiRow> {
             requests: 0,
             neurons: 0.0,
         });
-        entry.requests += u64_at(&r, "/count");
-        entry.neurons += f64_at(&r, "/sum/totalNeurons");
+        entry.requests += u64_at(r, "/count");
+        entry.neurons += f64_at(r, "/sum/totalNeurons");
     }
     let mut out: Vec<_> = by_model.into_values().collect();
     out.sort_by(|a, b| {
@@ -650,20 +578,10 @@ fn aggregate_ai(v: &Value) -> Vec<AiRow> {
     out
 }
 
-fn sum_build_minutes(v: &Value) -> f64 {
-    account(v)
-        .and_then(|a| a.get("workersBuildsBuildMinutesAdaptiveGroups"))
-        .and_then(|x| x.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|r| r.pointer("/sum/buildMinutes").and_then(|x| x.as_f64()))
-                .sum()
-        })
-        .unwrap_or(0.0)
-}
-
-fn account(v: &Value) -> Option<&Value> {
-    v.pointer("/data/viewer/accounts/0")
+fn sum_build_minutes(rows: &[Value]) -> f64 {
+    rows.iter()
+        .filter_map(|r| r.pointer("/sum/buildMinutes").and_then(|x| x.as_f64()))
+        .sum()
 }
 
 fn u64_at(v: &Value, ptr: &str) -> u64 {
