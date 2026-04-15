@@ -1,5 +1,8 @@
+[workspace]
+members = ["burnage"]
+
 [package]
-name = "cc-proxy"
+name = "claudemetry"
 version = "0.1.0"
 edition = "2021"
 
@@ -15,7 +18,6 @@ js-sys = "0.3"
 wasm-bindgen = "0.2"
 sha2 = "0.10"
 hex = "0.4"
-base64 = "0.22"
 
 [profile.release]
 lto = true

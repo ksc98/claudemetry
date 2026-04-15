@@ -66,6 +66,13 @@ dashboard-tail:
 # Deploy both workers.
 deploy-all: deploy dashboard-deploy
 
+# -------- burnage (Rust CLI) --------
+
+# Install burnage to ~/.cargo/bin. Bakes https://$DOMAIN in as the default
+# proxy URL so the CLI works out of the box without --url.
+burnage-install:
+    BURNAGE_DEFAULT_URL="https://$DOMAIN" cargo install --path burnage --force
+
 # -------- Cloudflare Access --------
 
 # Idempotently provision / repair the Access apps and policies for $DOMAIN.
