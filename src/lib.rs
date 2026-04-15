@@ -1541,12 +1541,14 @@ async fn vectorize_upsert(
         .get_binding::<VectorizeBinding>("VECTORIZE")
         .map_err(|e| format!("binding: {e}"))?;
 
-    // id prefix enforces isolation even if the metadata filter is ever misconfigured.
-    // Use #[derive(Serialize)] structs so serde-wasm-bindgen emits plain JS
-    // objects (not Maps) — Vectorize's validator chokes on the latter.
+    // Per-user `namespace` is the hard isolation boundary — queries against
+    // one namespace physically cannot see vectors in another. The id prefix
+    // is kept as a belt-and-suspenders uniqueness guard (vector IDs share a
+    // keyspace within the index). Use #[derive(Serialize)] structs so
+    // serde-wasm-bindgen emits plain JS objects (not Maps) — Vectorize's
+    // validator chokes on the latter.
     #[derive(Serialize)]
     struct Metadata<'a> {
-        user_hash: &'a str,
         session_id: &'a str,
         ts: i64,
     }
@@ -1554,13 +1556,14 @@ async fn vectorize_upsert(
     struct VectorRecord<'a> {
         id: String,
         values: &'a [f32],
+        namespace: &'a str,
         metadata: Metadata<'a>,
     }
     let record = VectorRecord {
         id: format!("{}:{}", user_hash, tx_id),
         values,
+        namespace: user_hash,
         metadata: Metadata {
-            user_hash,
             session_id: session_id.unwrap_or(""),
             ts,
         },
@@ -1588,20 +1591,16 @@ async fn vectorize_query(
     let values: Vec<f64> = query_vec.iter().map(|&x| x as f64).collect();
     let q_arg = serde_wasm_bindgen::to_value(&values).map_err(|e| format!("encode q: {e}"))?;
     #[derive(Serialize)]
-    struct Filter<'a> {
-        user_hash: &'a str,
-    }
-    #[derive(Serialize)]
     struct QueryOpts<'a> {
         #[serde(rename = "topK")]
         top_k: usize,
-        filter: Filter<'a>,
+        namespace: &'a str,
         #[serde(rename = "returnMetadata")]
         return_metadata: &'static str,
     }
     let opts = QueryOpts {
         top_k,
-        filter: Filter { user_hash },
+        namespace: user_hash,
         return_metadata: "all",
     };
     let opts_arg = serde_wasm_bindgen::to_value(&opts).map_err(|e| format!("encode opts: {e}"))?;

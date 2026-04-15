@@ -33,15 +33,15 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
                        ▼                              ▼
       ┌─────────────────────────────────┐  ┌─────────────────────────┐
       │  UserStore Durable Object       │  │  Vectorize              │
-      │  (one instance per user_hash)   │  │  (global index,         │
-      │                                 │  │   filtered by user_hash)│
+      │  (one instance per user_hash)   │  │  (shared index,         │
+      │                                 │  │   namespace=user_hash)  │
       │  transactions + FTS5 virtual    │  │                         │
       │    table (triggers mirror       │  │  claudemetry-turns,     │
       │    user_text + assistant_text)  │  │  bge-base-en-v1.5       │
       │  search_rate_limit counter      │  │  768-dim cosine         │
       │  session_ends                   │  │                         │
-      │                                 │  │  search queries         │
-      │  POST /search orchestrates      ├─►│  filter {user_hash}     │
+      │                                 │  │  search queries scoped  │
+      │  POST /search orchestrates      ├─►│  to namespace=user_hash │
       │  FTS + VECTORIZE.query + RRF    │  │  topK → tx_ids          │
       └─────────────────────────────────┘  └─────────────────────────┘
 ```
@@ -51,10 +51,12 @@ the first request with a given hash materializes the DO, runs
 `CREATE TABLE IF NOT EXISTS`, and inserts the row. Two users share no table,
 no index, no memory space.
 
-Vectorize is a single global index; isolation is enforced by a
-`{user_hash}:` id prefix + a server-side metadata filter on every query.
-FTS5 is trivially isolated (lives inside each user's DO); Vectorize trades
-hard isolation for semantic recall — the two indexes complement each other.
+Vectorize uses a single shared index with per-user isolation at the namespace
+level — every upsert and query carries `namespace=<user_hash>`, so a query
+physically cannot see vectors outside the caller's namespace. The id prefix
+`{user_hash}:` is retained as a uniqueness guard within the index. FTS5 is
+trivially isolated (lives inside each user's DO); the two indexes complement
+each other.
 
 ## Requirements
 

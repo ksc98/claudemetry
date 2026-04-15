@@ -69,8 +69,9 @@ deploy-all: deploy dashboard-deploy
 # -------- Vectorize --------
 
 # One-time provisioning for /_cm/search. Creates the `claudemetry-turns`
-# index (768-dim, cosine — matches bge-base-en-v1.5) and the `user_hash`
-# metadata index used as the per-caller isolation filter on every query.
+# index (768-dim, cosine — matches bge-base-en-v1.5). Per-user isolation is
+# handled at query time via Vectorize namespaces (namespace=<user_hash>),
+# not via a metadata index, so no create-metadata-index step is needed.
 # Idempotent: re-runs treat "already exists" as success.
 vectorize-create:
     #!/usr/bin/env bash
@@ -82,14 +83,6 @@ vectorize-create:
         echo "→ index ready"
     else
         echo "× index create failed" >&2; exit 1
-    fi
-    out=$(npx --yes wrangler@latest vectorize create-metadata-index claudemetry-turns \
-        --property-name=user_hash --type=string 2>&1)
-    echo "$out"
-    if echo "$out" | grep -qiE "successfully (created|enqueued)|already exists|duplicate_name|duplicate"; then
-        echo "→ user_hash metadata index ready"
-    else
-        echo "× metadata index create failed" >&2; exit 1
     fi
 
 vectorize-info:

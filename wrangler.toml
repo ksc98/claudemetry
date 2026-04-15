@@ -28,9 +28,10 @@ new_sqlite_classes = ["UserStore"]
 [ai]
 binding = "AI"
 
-# Vectorize: global semantic index. Isolation is enforced by a `user_hash`
-# metadata filter + an id prefix (`{user_hash}:{tx_id}`) on every upsert/query.
-# Provision once before first deploy: `just vectorize-create`.
+# Vectorize: shared semantic index. Per-user isolation is a Vectorize
+# `namespace` (namespace=<user_hash>) on every upsert/query — hard partition,
+# not a metadata filter. The id prefix (`{user_hash}:{tx_id}`) remains as a
+# uniqueness guard within the index. Provision once: `just vectorize-create`.
 [[vectorize]]
 binding = "VECTORIZE"
 index_name = "claudemetry-turns"
