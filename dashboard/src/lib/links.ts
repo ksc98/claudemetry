@@ -1,6 +1,6 @@
-// Maps a Cloudflare-Access-authenticated Google email to a user_hash.
-// Lets the dashboard auto-scope to the right DO after a one-time /setup
-// paste, across browsers/devices for the same Google identity.
+// Read-side helpers for the email → user_hash mapping. The proxy worker is
+// the only writer (auto-link side-effect of compute_user_hash); the dashboard
+// just reads the link to scope itself to the caller's DO.
 
 const LINK_PREFIX = "link:";
 
@@ -23,19 +23,4 @@ export async function getLinkedHash(
   const v = await kv.get(keyFor(email));
   if (v && /^[0-9a-f]{16}$/.test(v)) return v;
   return null;
-}
-
-export async function linkEmailToHash(
-  kv: KVNamespace,
-  email: string,
-  hash: string,
-): Promise<void> {
-  await kv.put(keyFor(email), hash);
-}
-
-export async function unlinkEmail(
-  kv: KVNamespace,
-  email: string,
-): Promise<void> {
-  await kv.delete(keyFor(email));
 }

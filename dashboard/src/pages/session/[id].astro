@@ -1,0 +1,327 @@
+---
+export const prerender = false;
+
+import { env } from "cloudflare:workers";
+import Base from "@/layouts/Base.astro";
+import KpiCard from "@/components/KpiCard.astro";
+import MixBar from "@/components/MixBar.astro";
+import ToolFrequency from "@/components/ToolFrequency.astro";
+import SessionTimelineChart from "@/components/SessionTimelineChart";
+import SessionTurnsTable from "@/components/SessionTurnsTable";
+import RowsPoller from "@/components/RowsPoller";
+import { readUserHash } from "@/lib/cookie";
+import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
+import {
+  getRecent,
+  getSessionEnds,
+  type TransactionRow,
+  type SessionEnds,
+} from "@/lib/store";
+import {
+  estimateCostUsd,
+  fmtInt,
+  fmtUsd,
+  fmtAgo,
+  fmtDuration,
+} from "@/lib/format";
+import { stopColorVar } from "@/lib/stop";
+import {
+  MessageSquare,
+  ArrowUpFromLine,
+  Database,
+  DollarSign,
+  ArrowLeft,
+} from "lucide-react";
+
+const sessionId = Astro.params.id;
+if (!sessionId) return Astro.redirect("/");
+
+const cfEmail = readCfAccessEmail(Astro.request);
+const linked = await getLinkedHash(env.SESSION, cfEmail);
+const cookieHash = readUserHash(Astro.request.headers.get("cookie"));
+const userHash = linked ?? cookieHash;
+// No identity yet → bounce to home, which renders the auto-link empty state.
+if (!userHash) return Astro.redirect("/");
+
+const ns = env.USER_STORE;
+
+let allRows: TransactionRow[] = [];
+let sessionEnds: SessionEnds = {};
+let loadErr: string | null = null;
+try {
+  [allRows, sessionEnds] = await Promise.all([
+    getRecent(ns, userHash),
+    getSessionEnds(ns, userHash),
+  ]);
+} catch (e) {
+  loadErr = e instanceof Error ? e.message : String(e);
+}
+
+const rows = allRows
+  .filter((r) => r.session_id === sessionId)
+  .sort((a, b) => a.ts - b.ts);
+
+if (!loadErr && rows.length === 0) {
+  // Session not found for this user. Surface a soft 404 instead of redirect
+  // so the URL stays shareable/refresh-able if the row arrives later.
+}
+
+const totalCost = rows.reduce((a, r) => a + estimateCostUsd(r), 0);
+const totalInput = rows.reduce((a, r) => a + r.input_tokens, 0);
+const totalOutput = rows.reduce((a, r) => a + r.output_tokens, 0);
+const totalCacheRead = rows.reduce((a, r) => a + r.cache_read, 0);
+const totalCacheCreation = rows.reduce((a, r) => a + r.cache_creation, 0);
+const firstTs = rows[0]?.ts ?? null;
+const lastTs = rows[rows.length - 1]?.ts ?? null;
+const duration = firstTs && lastTs ? lastTs - firstTs : 0;
+
+const avgLatency =
+  rows.length > 0 ? rows.reduce((a, r) => a + r.elapsed_ms, 0) / rows.length : 0;
+
+// Context = input + cache_read per turn. Peak lets you see how big the
+// in-context payload got at any point in the session.
+const contextSeries = rows.map((r) => r.input_tokens + r.cache_read);
+const contextPeak = contextSeries.length > 0 ? Math.max(...contextSeries) : 0;
+const contextFirst = contextSeries[0] ?? 0;
+const contextLast = contextSeries[contextSeries.length - 1] ?? 0;
+const contextDeltaPct =
+  contextFirst > 0 ? (contextLast / contextFirst - 1) * 100 : 0;
+
+const ACTIVE_WINDOW_MS = 3 * 60_000;
+const now = Date.now();
+const endedAt = sessionEnds[sessionId] ?? null;
+const active =
+  lastTs != null &&
+  now - lastTs < ACTIVE_WINDOW_MS &&
+  (endedAt == null || endedAt < lastTs);
+
+// Rate-limit snapshot is account-global, sourced from the freshest row we have.
+const rlRow = allRows.find(
+  (r) => r.rl_tok_remaining != null && r.rl_tok_limit != null && r.rl_tok_limit > 0,
+);
+const rateLimit =
+  rlRow && rlRow.rl_tok_remaining != null && rlRow.rl_tok_limit != null
+    ? { tokRemaining: rlRow.rl_tok_remaining, tokLimit: rlRow.rl_tok_limit }
+    : null;
+
+function shortSession(id: string): string {
+  return id.slice(0, 8);
+}
+
+// Stop-reason mix for this session.
+const stopCounts = new Map<string, number>();
+for (const r of rows) {
+  const k = r.stop_reason ?? "unknown";
+  stopCounts.set(k, (stopCounts.get(k) ?? 0) + 1);
+}
+const STOP_ORDER = ["tool_use", "end_turn", "max_tokens", "stop_sequence", "error"];
+const stopSegments = STOP_ORDER.map((k) => ({
+  label: k,
+  value: stopCounts.get(k) ?? 0,
+  color: stopColorVar(k),
+}))
+  .concat(
+    stopCounts.has("unknown")
+      ? [{ label: "unknown", value: stopCounts.get("unknown")!, color: "var(--color-subtle-foreground)" }]
+      : [],
+  )
+  .filter((s) => s.value > 0);
+
+// Model mix (usually 1-2 models within a session).
+const modelCounts = new Map<string, number>();
+for (const r of rows) {
+  if (!r.model) continue;
+  const short = r.model.replace(/-\d{8}$/, "").replace(/^claude-/, "");
+  modelCounts.set(short, (modelCounts.get(short) ?? 0) + 1);
+}
+const MODEL_PALETTE = [
+  "var(--color-chart-3)",
+  "var(--color-chart-1)",
+  "var(--color-chart-5)",
+  "var(--color-chart-2)",
+  "var(--color-chart-4)",
+];
+const modelSegments = [...modelCounts.entries()]
+  .sort((a, b) => b[1] - a[1])
+  .map(([label, value], i) => ({
+    label,
+    value,
+    color: MODEL_PALETTE[i % MODEL_PALETTE.length],
+  }));
+
+// KPI sparklines (chronological).
+const sparkLatency = rows.map((r) => r.elapsed_ms);
+const sparkOutput = rows.map((r) => r.output_tokens);
+const sparkContext = contextSeries;
+const sparkCost = rows.map((r) => estimateCostUsd(r));
+---
+
+<Base
+  title={`llmetry — session ${shortSession(sessionId)}`}
+  headerStats={{
+    spendUsd: totalCost,
+    turns: rows.length,
+    sessions: 1,
+    activeSession: active ? shortSession(sessionId) : null,
+    rateLimit,
+  }}
+  activePath={`/session/${sessionId}`}
+>
+  <RowsPoller client:load intervalMs={1000} />
+
+  <div class="mb-6 flex items-baseline justify-between gap-4 flex-wrap">
+    <div>
+      <a
+        href="/"
+        class="inline-flex items-center gap-1.5 text-xs text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)] mb-2"
+      >
+        <ArrowLeft size={12} />
+        <span>Overview</span>
+      </a>
+      <h1 class="text-2xl font-semibold tracking-tight flex items-center gap-3">
+        <span>Session</span>
+        <code class="font-mono text-[var(--color-volume)] text-xl">
+          {shortSession(sessionId)}
+        </code>
+        {active ? (
+          <span class="flex items-center gap-1 text-[0.6875rem] uppercase tracking-wider text-[var(--color-good)]">
+            <span class="live-dot" />
+            active
+          </span>
+        ) : (
+          <span class="text-[0.6875rem] uppercase tracking-wider text-[var(--color-subtle-foreground)]">
+            ended
+          </span>
+        )}
+      </h1>
+      <p class="text-xs text-[var(--color-subtle-foreground)] mt-1 font-mono tabular-nums">
+        {rows.length} turns · {fmtDuration(duration)}
+        {lastTs != null && (
+          <>
+            {" "}· last turn <span data-ts={lastTs} data-ts-suffix=" ago">{fmtAgo(lastTs)} ago</span>
+          </>
+        )}
+      </p>
+    </div>
+    <code class="text-[0.6875rem] text-[var(--color-subtle-foreground)] font-mono break-all max-w-full">
+      {sessionId}
+    </code>
+  </div>
+
+  {loadErr && (
+    <div class="mb-6 px-4 py-3 rounded-xl border border-[var(--color-danger-muted)] bg-[var(--color-danger-muted)] text-[var(--color-danger)] text-sm">
+      Failed to load from DO: {loadErr}
+    </div>
+  )}
+
+  {!loadErr && rows.length === 0 && (
+    <div class="card p-10 text-center">
+      <p class="text-sm text-[var(--color-muted-foreground)]">
+        No turns yet for session <code class="font-mono text-[var(--color-volume)]">{shortSession(sessionId)}</code>.
+      </p>
+      <p class="text-xs text-[var(--color-subtle-foreground)] mt-2">
+        This page will populate live as turns arrive.
+      </p>
+    </div>
+  )}
+
+  {rows.length > 0 && (
+    <>
+      <section class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <KpiCard
+          label="Turns"
+          value={fmtInt(rows.length)}
+          sub={`${fmtDuration(avgLatency)} avg`}
+          accent="neutral"
+          sparkValues={sparkLatency}
+          sparkMode="bars"
+        >
+          <MessageSquare slot="icon" size={16} />
+        </KpiCard>
+        <KpiCard
+          label="Output tokens"
+          value={fmtInt(totalOutput)}
+          sub={`${fmtInt(totalInput)} input`}
+          accent="volume"
+          sparkValues={sparkOutput}
+          sparkMode="bars"
+        >
+          <ArrowUpFromLine slot="icon" size={16} />
+        </KpiCard>
+        <KpiCard
+          label="Context peak"
+          value={fmtInt(contextPeak)}
+          sub={`${contextDeltaPct >= 0 ? "+" : ""}${contextDeltaPct.toFixed(0)}% from turn 1`}
+          accent="volume"
+          sparkValues={sparkContext}
+          sparkMode="line"
+        >
+          <Database slot="icon" size={16} />
+        </KpiCard>
+        <KpiCard
+          label="Cost"
+          value={fmtUsd(totalCost)}
+          sub={`${fmtInt(totalCacheRead)} cache read · ${fmtInt(totalCacheCreation)} write`}
+          accent="money"
+          sparkValues={sparkCost}
+          sparkMode="bars"
+        >
+          <DollarSign slot="icon" size={16} />
+        </KpiCard>
+      </section>
+
+      <section class="card p-5 mb-8">
+        <div class="flex items-baseline justify-between mb-1">
+          <h2 class="text-sm font-medium">Per-turn timeline</h2>
+          <div class="flex items-center gap-3 text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)]">
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm bg-[var(--color-chart-1)]" /> cache read
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm bg-[var(--color-chart-2)]" /> cache create
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm bg-[var(--color-chart-4)]" /> output
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-sm bg-[var(--color-chart-5)]" /> input
+            </span>
+            <span class="flex items-center gap-1.5">
+              <span class="w-2 h-0.5 bg-[var(--color-money)]" /> cost ($)
+            </span>
+          </div>
+        </div>
+        <p class="text-xs text-[var(--color-subtle-foreground)] mb-4">
+          Per-turn tokens (linear scale) with cost overlay. {rows.length} turns total.
+        </p>
+        <SessionTimelineChart
+          client:load
+          initialRows={allRows}
+          sessionId={sessionId}
+        />
+      </section>
+
+      <section class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+        <div class="card p-5">
+          <div class="mb-3">
+            <h2 class="text-sm font-medium">Mix</h2>
+            <p class="text-[0.6875rem] text-[var(--color-subtle-foreground)]">
+              Stop reasons &amp; models for this session
+            </p>
+          </div>
+          <div class="space-y-4">
+            <MixBar title="Stop reasons" segments={stopSegments} />
+            <MixBar title="Models" segments={modelSegments} />
+          </div>
+        </div>
+        <ToolFrequency rows={rows} limit={12} title="Tools in this session" />
+      </section>
+
+      <SessionTurnsTable
+        client:load
+        initialRows={allRows}
+        sessionId={sessionId}
+      />
+    </>
+  )}
+</Base>

@@ -13,6 +13,7 @@ import { estimateCostUsd } from "@/lib/format";
 import { subscribeRows } from "@/lib/rowsBus";
 
 type Point = {
+  turn: number;
   ts: number;
   input: number;
   output: number;
@@ -21,26 +22,19 @@ type Point = {
   cost: number;
 };
 
-function rowsToPoints(rows: TransactionRow[]): Point[] {
-  return [...rows]
+function rowsToPoints(rows: TransactionRow[], sessionId: string): Point[] {
+  return rows
+    .filter((r) => r.session_id === sessionId)
     .sort((a, b) => a.ts - b.ts)
-    .filter((r) => r.output_tokens > 0 || r.input_tokens > 50)
-    .slice(-30)
-    .map((r) => ({
+    .map((r, i) => ({
+      turn: i + 1,
       ts: r.ts,
-      input: Math.max(r.input_tokens, 1),
-      output: Math.max(r.output_tokens, 1),
-      cache_read: Math.max(r.cache_read, 1),
-      cache_creation: Math.max(r.cache_creation, 1),
+      input: r.input_tokens,
+      output: r.output_tokens,
+      cache_read: r.cache_read,
+      cache_creation: r.cache_creation,
       cost: estimateCostUsd(r),
     }));
-}
-
-function fmtTs(ms: number): string {
-  const d = new Date(ms);
-  const h = String(d.getHours()).padStart(2, "0");
-  const m = String(d.getMinutes()).padStart(2, "0");
-  return `${h}:${m}`;
 }
 
 function fmtTokens(n: number): string {
@@ -55,10 +49,12 @@ function fmtUsd(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
-export default function TokenChart({
+export default function SessionTimelineChart({
   initialRows,
+  sessionId,
 }: {
   initialRows: TransactionRow[];
+  sessionId: string;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState<number>(0);
@@ -80,7 +76,7 @@ export default function TokenChart({
 
   useEffect(() => subscribeRows(setRows), []);
 
-  const data = useMemo(() => rowsToPoints(rows), [rows]);
+  const data = useMemo(() => rowsToPoints(rows, sessionId), [rows, sessionId]);
 
   if (data.length === 0) return null;
   return (
@@ -93,19 +89,19 @@ export default function TokenChart({
           margin={{ top: 12, right: 48, bottom: 4, left: 4 }}
         >
           <defs>
-            <linearGradient id="fillCacheRead" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id="sfillCacheRead" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="var(--color-chart-1)" stopOpacity={0.35} />
               <stop offset="95%" stopColor="var(--color-chart-1)" stopOpacity={0.05} />
             </linearGradient>
-            <linearGradient id="fillCacheCreation" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id="sfillCacheCreation" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="var(--color-chart-2)" stopOpacity={0.35} />
               <stop offset="95%" stopColor="var(--color-chart-2)" stopOpacity={0.05} />
             </linearGradient>
-            <linearGradient id="fillOutput" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id="sfillOutput" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="var(--color-chart-4)" stopOpacity={0.45} />
               <stop offset="95%" stopColor="var(--color-chart-4)" stopOpacity={0.08} />
             </linearGradient>
-            <linearGradient id="fillInput" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id="sfillInput" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="var(--color-chart-5)" stopOpacity={0.5} />
               <stop offset="95%" stopColor="var(--color-chart-5)" stopOpacity={0.1} />
             </linearGradient>
@@ -116,24 +112,21 @@ export default function TokenChart({
             vertical={false}
           />
           <XAxis
-            dataKey="ts"
-            tickFormatter={fmtTs}
+            dataKey="turn"
             axisLine={false}
             tickLine={false}
             tick={{ fill: "var(--color-muted-foreground)", fontSize: 11 }}
-            minTickGap={60}
+            tickFormatter={(v) => `#${v}`}
+            minTickGap={20}
             interval="preserveStartEnd"
           />
           <YAxis
             yAxisId="tokens"
-            scale="log"
-            domain={[1, "dataMax"]}
             tickFormatter={fmtTokens}
             axisLine={false}
             tickLine={false}
             tick={{ fill: "var(--color-muted-foreground)", fontSize: 11 }}
-            width={40}
-            allowDataOverflow={false}
+            width={44}
           />
           <YAxis
             yAxisId="cost"
@@ -151,23 +144,19 @@ export default function TokenChart({
               borderRadius: 8,
               fontSize: 12,
             }}
-            labelFormatter={(v) => fmtTs(v as number)}
+            labelFormatter={(v) => `Turn #${v}`}
             formatter={(value, name) => {
               if (name === "cost") return [fmtUsd(value as number), "cost"];
               return [fmtTokens(value as number), name];
             }}
           />
-          {/* Independent (not stacked) overlapping areas — stacking on log
-              scale is mathematically invalid, so each series gets its own
-              alpha-fill layer. Order matters for visual stacking: largest
-              series first so smaller ones remain visible on top. */}
           <Area
             yAxisId="tokens"
             type="monotone"
             dataKey="cache_read"
             stroke="var(--color-chart-1)"
             strokeWidth={1.25}
-            fill="url(#fillCacheRead)"
+            fill="url(#sfillCacheRead)"
             name="cache_read"
             isAnimationActive={false}
           />
@@ -177,7 +166,7 @@ export default function TokenChart({
             dataKey="cache_creation"
             stroke="var(--color-chart-2)"
             strokeWidth={1.25}
-            fill="url(#fillCacheCreation)"
+            fill="url(#sfillCacheCreation)"
             name="cache_creation"
             isAnimationActive={false}
           />
@@ -187,7 +176,7 @@ export default function TokenChart({
             dataKey="output"
             stroke="var(--color-chart-4)"
             strokeWidth={1.25}
-            fill="url(#fillOutput)"
+            fill="url(#sfillOutput)"
             name="output"
             isAnimationActive={false}
           />
@@ -197,7 +186,7 @@ export default function TokenChart({
             dataKey="input"
             stroke="var(--color-chart-5)"
             strokeWidth={1.25}
-            fill="url(#fillInput)"
+            fill="url(#sfillInput)"
             name="input"
             isAnimationActive={false}
           />
@@ -207,7 +196,7 @@ export default function TokenChart({
             dataKey="cost"
             stroke="var(--color-money)"
             strokeWidth={1.75}
-            dot={false}
+            dot={{ r: 2, fill: "var(--color-money)" }}
             name="cost"
             isAnimationActive={false}
           />

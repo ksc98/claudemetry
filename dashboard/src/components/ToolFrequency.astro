@@ -1,0 +1,60 @@
+---
+import type { TransactionRow } from "@/lib/store";
+import { shortToolName } from "@/lib/tools";
+
+interface Props {
+  rows: TransactionRow[];
+  limit?: number;
+  title?: string;
+}
+
+const { rows, limit = 8, title = "Top tools" } = Astro.props;
+
+const counts = new Map<string, number>();
+for (const r of rows) {
+  if (!r.tools_json) continue;
+  let parsed: string[] = [];
+  try {
+    parsed = JSON.parse(r.tools_json);
+  } catch {
+    continue;
+  }
+  for (const name of parsed) {
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+}
+
+const top = [...counts.entries()]
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, limit);
+const totalCalls = [...counts.values()].reduce((a, v) => a + v, 0);
+const distinct = counts.size;
+---
+
+<div class="card p-5" data-live-region="tools">
+  <div class="flex items-baseline justify-between mb-3">
+    <div>
+      <h2 class="text-sm font-medium">{title}</h2>
+      <p class="text-[0.6875rem] text-[var(--color-subtle-foreground)]">
+        {distinct} distinct · {totalCalls.toLocaleString()} calls
+      </p>
+    </div>
+  </div>
+
+  {top.length === 0 ? (
+    <p class="text-xs text-[var(--color-subtle-foreground)] italic">
+      No tool use recorded yet.
+    </p>
+  ) : (
+    <ul class="flex flex-wrap gap-1.5">
+      {top.map(([name, n]) => (
+        <li>
+          <span class="chip tabular-nums" title={name}>
+            <span class="text-[var(--color-foreground)]">{shortToolName(name)}</span>
+            <span class="text-[var(--color-subtle-foreground)] ml-1.5">×{n}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  )}
+</div>

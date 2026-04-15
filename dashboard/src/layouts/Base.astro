@@ -8,6 +8,15 @@ interface Props {
     turns: number;
     sessions: number;
     activeSession?: string | null;
+    /** Trailing $/min burn rate. Hidden when null/0. */
+    burnUsdPerMin?: number | null;
+    /** Fraction of recent turns that failed (0..1). Hidden when null/0. */
+    errorRate?: number | null;
+    /** Most-recent rate-limit snapshot from Anthropic's response headers. */
+    rateLimit?: {
+      tokRemaining: number;
+      tokLimit: number;
+    } | null;
   };
   activePath?: string;
 }
@@ -17,6 +26,11 @@ function fmtUsd(n: number): string {
   if (n === 0) return "$0.00";
   if (n < 0.01) return `$${n.toFixed(4)}`;
   return `$${n.toFixed(2)}`;
+}
+
+function fmtBurn(n: number): string {
+  if (n < 0.01) return `$${n.toFixed(4)}/min`;
+  return `$${n.toFixed(2)}/min`;
 }
 
 const navItems: { href: string; label: string }[] = [
@@ -63,10 +77,58 @@ const navItems: { href: string; label: string }[] = [
                 <span class="tabular-nums font-mono">
                   <span class="text-[var(--color-money)] font-medium">{fmtUsd(headerStats.spendUsd)}</span>
                 </span>
+                {headerStats.burnUsdPerMin != null && headerStats.burnUsdPerMin > 0 && (
+                  <>
+                    <span class="text-[var(--color-subtle-foreground)]">·</span>
+                    <span
+                      class="tabular-nums font-mono text-[var(--color-money)]/80"
+                      title="Trailing 5-minute burn rate"
+                    >
+                      {fmtBurn(headerStats.burnUsdPerMin)}
+                    </span>
+                  </>
+                )}
                 <span class="text-[var(--color-subtle-foreground)]">·</span>
                 <span class="tabular-nums font-mono">{headerStats.turns} turns</span>
                 <span class="text-[var(--color-subtle-foreground)]">·</span>
                 <span class="tabular-nums font-mono">{headerStats.sessions} sessions</span>
+                {headerStats.errorRate != null && headerStats.errorRate > 0 && (
+                  <>
+                    <span class="text-[var(--color-subtle-foreground)]">·</span>
+                    <span
+                      class="tabular-nums font-mono text-[var(--color-danger)] font-medium"
+                      title="Fraction of recent turns with status ≥ 400"
+                    >
+                      {(headerStats.errorRate * 100).toFixed(headerStats.errorRate < 0.1 ? 1 : 0)}% err
+                    </span>
+                  </>
+                )}
+                {headerStats.rateLimit && headerStats.rateLimit.tokLimit > 0 && (() => {
+                  const { tokRemaining, tokLimit } = headerStats.rateLimit;
+                  const pct = Math.max(0, Math.min(100, (tokRemaining / tokLimit) * 100));
+                  const color = pct < 15 ? "var(--color-danger)" : pct < 40 ? "var(--color-warn)" : "var(--color-good)";
+                  return (
+                    <>
+                      <span class="text-[var(--color-subtle-foreground)]">·</span>
+                      <span
+                        class="inline-flex items-center gap-1.5 tabular-nums"
+                        title={`Anthropic rate-limit — ${tokRemaining.toLocaleString()} / ${tokLimit.toLocaleString()} input tokens remaining this window`}
+                      >
+                        <span
+                          class="inline-flex overflow-hidden rounded-full bg-[var(--color-border)]"
+                          style={`width:32px;height:4px;`}
+                        >
+                          <span
+                            style={`width:${pct}%;height:100%;background:${color};`}
+                          />
+                        </span>
+                        <span class="font-mono text-[var(--color-muted-foreground)]">
+                          {Math.round(pct)}%
+                        </span>
+                      </span>
+                    </>
+                  );
+                })()}
               </div>
             )
           }
@@ -124,7 +186,7 @@ const navItems: { href: string; label: string }[] = [
       // Fetches the current page, parses, and swaps every [data-live-region]
       // block in place. The chart section is excluded so the React island
       // keeps its state.
-      const POLL_MS = 10_000;
+      const POLL_MS = 5_000;
       let polling = false;
       async function pollRefresh() {
         if (polling || document.hidden) return;
@@ -143,7 +205,35 @@ const navItems: { href: string; label: string }[] = [
             const name = fresh.getAttribute("data-live-region");
             if (!name) return;
             const target = document.querySelector(`[data-live-region="${name}"]`);
-            if (target) target.innerHTML = fresh.innerHTML;
+            if (!target) return;
+            // For the sessions region, diff per-card lastTs so we can glow
+            // cards whose most-recent turn advanced.
+            const prevTs = new Map<string, number>();
+            if (name === "sessions") {
+              target
+                .querySelectorAll<HTMLElement>("[data-session-card]")
+                .forEach((el) => {
+                  const id = el.getAttribute("data-session-id") ?? "";
+                  const ts = Number(el.getAttribute("data-last-ts") ?? "0");
+                  if (id) prevTs.set(id, ts);
+                });
+            }
+            target.innerHTML = fresh.innerHTML;
+            if (name === "sessions" && prevTs.size > 0) {
+              target
+                .querySelectorAll<HTMLElement>("[data-session-card]")
+                .forEach((el) => {
+                  const id = el.getAttribute("data-session-id") ?? "";
+                  const ts = Number(el.getAttribute("data-last-ts") ?? "0");
+                  const before = prevTs.get(id);
+                  if (before != null && ts > before) {
+                    el.classList.remove("glow");
+                    // Force reflow so re-adding the class restarts the animation.
+                    void el.offsetWidth;
+                    el.classList.add("glow");
+                  }
+                });
+            }
           });
           refreshAges();
         } catch (e) {

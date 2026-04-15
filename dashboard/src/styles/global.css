@@ -113,6 +113,16 @@ table {
 .dot-warn { background: var(--color-warn); box-shadow: 0 0 6px 0 var(--color-warn-muted); }
 .dot-danger { background: var(--color-danger); box-shadow: 0 0 6px 0 var(--color-danger-muted); }
 
+/* New-event glow — applied briefly when a session card's lastTs advances. */
+.glow {
+  animation: glow-pulse 1.2s ease-out 1;
+}
+@keyframes glow-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--color-good-muted), inset 0 1px 0 0 oklch(1 0 0 / 0.04); border-color: var(--color-good); }
+  40%  { box-shadow: 0 0 18px 4px var(--color-good-muted), inset 0 1px 0 0 oklch(1 0 0 / 0.04); border-color: var(--color-good); }
+  100% { box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.04); }
+}
+
 /* Live indicator. */
 .live-dot {
   display: inline-block;

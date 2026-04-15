@@ -6,11 +6,12 @@ import Base from "@/layouts/Base.astro";
 import KpiCard from "@/components/KpiCard.astro";
 import Sparkline from "@/components/Sparkline.astro";
 import TokenChart from "@/components/TokenChart";
+import RecentTurnsTable from "@/components/RecentTurnsTable";
+import RowsPoller from "@/components/RowsPoller";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
-import { getStats, getRecent, type TransactionRow } from "@/lib/store";
+import { getStats, getRecent, getSessionEnds, type TransactionRow, type SessionEnds } from "@/lib/store";
 import { estimateCostUsd, fmtInt, fmtUsd, fmtAgo, fmtDuration } from "@/lib/format";
-import { shortToolName } from "@/lib/tools";
 import {
   MessageSquare,
   ArrowUpFromLine,
@@ -21,24 +22,31 @@ import {
 const domain = env.DOMAIN ?? "your-proxy";
 
 // Identity resolution priority:
-//   1. Google email (via CF Access) → KV link → user_hash
-//   2. Cookie (manual paste fallback, pre-Access or dev-local)
-//   3. Redirect to /setup
+//   1. CF Access email → KV link → user_hash (auto-populated by the proxy
+//      on every request; works for free if Anthropic email == CF Access email)
+//   2. Cookie (manual paste fallback for dev-local with no CF Access)
+//   3. Empty state — no proxy traffic seen yet under this email
 const cfEmail = readCfAccessEmail(Astro.request);
 const linked = await getLinkedHash(env.SESSION, cfEmail);
 const cookieHash = readUserHash(Astro.request.headers.get("cookie"));
 const userHash = linked ?? cookieHash;
-if (!userHash) return Astro.redirect("/setup");
 
 const ns = env.USER_STORE;
 
 let stats: Awaited<ReturnType<typeof getStats>> | null = null;
 let rows: TransactionRow[] = [];
+let sessionEnds: SessionEnds = {};
 let loadErr: string | null = null;
-try {
-  [stats, rows] = await Promise.all([getStats(ns, userHash), getRecent(ns, userHash)]);
-} catch (e) {
-  loadErr = e instanceof Error ? e.message : String(e);
+if (userHash) {
+  try {
+    [stats, rows, sessionEnds] = await Promise.all([
+      getStats(ns, userHash),
+      getRecent(ns, userHash),
+      getSessionEnds(ns, userHash),
+    ]);
+  } catch (e) {
+    loadErr = e instanceof Error ? e.message : String(e);
+  }
 }
 
 // Chronological: oldest → newest for chart + rolling sparklines
@@ -52,6 +60,14 @@ const cacheRate = (() => {
   const denom = stats.input_tokens + stats.cache_read + stats.cache_creation;
   return denom > 0 ? stats.cache_read / denom : 0;
 })();
+
+// Cache TTL split (only present on newer API responses; may be null on old rows).
+const cache5mTotal = rows.reduce((a, r) => a + (r.cache_creation_5m ?? 0), 0);
+const cache1hTotal = rows.reduce((a, r) => a + (r.cache_creation_1h ?? 0), 0);
+const ttlKnown = cache5mTotal + cache1hTotal > 0;
+const longTtlPct = ttlKnown
+  ? (cache1hTotal / (cache5mTotal + cache1hTotal)) * 100
+  : 0;
 
 const avgLatency =
   rows.length > 0 ? rows.reduce((a, r) => a + r.elapsed_ms, 0) / rows.length : 0;
@@ -103,15 +119,6 @@ const chartData = chron
     cost: estimateCostUsd(r),
   }));
 
-// Dot color for stop_reason
-function stopDotClass(sr: string | null): string {
-  if (sr === "end_turn") return "dot-good";
-  if (sr === "tool_use") return "dot-muted";
-  if (sr === "max_tokens" || sr === "error") return "dot-danger";
-  if (sr === "stop_sequence") return "dot-warn";
-  return "dot-muted";
-}
-
 // Attribute rows to sessions.
 type SessionAgg = {
   id: string;
@@ -149,14 +156,25 @@ for (const r of rows) {
   }
   sessionMap.set(r.session_id, cur);
 }
-const sessionList = [...sessionMap.values()].sort((a, b) => b.lastTs - a.lastTs);
-
 // A session is "active" if its most recent turn lands within this window.
-// 5 minutes mirrors Anthropic's ephemeral prompt-cache TTL and feels right
-// for the "currently being used" signal.
-const ACTIVE_WINDOW_MS = 5 * 60_000;
+const ACTIVE_WINDOW_MS = 3 * 60_000;
 const now = Date.now();
-const isActive = (s: SessionAgg) => now - s.lastTs < ACTIVE_WINDOW_MS;
+// A session is active iff (a) last turn is within the window AND (b) no
+// SessionEnd marker has been recorded at or after that last turn.
+const isActive = (s: SessionAgg) => {
+  if (now - s.lastTs >= ACTIVE_WINDOW_MS) return false;
+  const endedAt = sessionEnds[s.id];
+  return endedAt == null || endedAt < s.lastTs;
+};
+// Active sessions sort ahead of inactive ones; within each group, most
+// recent turn first. An idle-but-recent session should never outrank a
+// live one just because its last turn happened to land more recently.
+const sessionList = [...sessionMap.values()].sort((a, b) => {
+  const aa = isActive(a) ? 1 : 0;
+  const ba = isActive(b) ? 1 : 0;
+  if (aa !== ba) return ba - aa;
+  return b.lastTs - a.lastTs;
+});
 const activeSession = sessionList.find(isActive) ?? null;
 
 function shortSession(id: string): string {
@@ -168,6 +186,30 @@ function sessionModels(s: SessionAgg): string {
   const name = top[0].replace(/-\d{8}$/, "").replace(/^claude-/, "");
   return s.models.size > 1 ? `${name} +${s.models.size - 1}` : name;
 }
+
+// Trailing 5-minute burn rate ($/min).
+const fiveMinAgo = now - 5 * 60_000;
+const recentSpend = rows
+  .filter((r) => r.ts >= fiveMinAgo)
+  .reduce((a, r) => a + estimateCostUsd(r), 0);
+const burnUsdPerMin = recentSpend / 5;
+
+// Error rate across the last 50 turns (rows come desc from /recent).
+const last50 = rows.slice(0, 50);
+const errorRate =
+  last50.length > 0
+    ? last50.filter((r) => r.status >= 400).length / last50.length
+    : 0;
+
+// Most recent rate-limit snapshot. Rows come sorted desc, so the first hit wins.
+const rlRow = rows.find(
+  (r) => r.rl_tok_remaining != null && r.rl_tok_limit != null && r.rl_tok_limit > 0,
+);
+const rateLimit =
+  rlRow && rlRow.rl_tok_remaining != null && rlRow.rl_tok_limit != null
+    ? { tokRemaining: rlRow.rl_tok_remaining, tokLimit: rlRow.rl_tok_limit }
+    : null;
+
 ---
 
 <Base
@@ -177,9 +219,13 @@ function sessionModels(s: SessionAgg): string {
     turns: rows.length,
     sessions,
     activeSession: activeSession ? shortSession(activeSession.id) : null,
+    burnUsdPerMin,
+    errorRate,
+    rateLimit,
   }}
   activePath="/"
 >
+  <RowsPoller client:load intervalMs={1000} />
   <div class="mb-7 flex items-baseline justify-between">
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
@@ -187,8 +233,16 @@ function sessionModels(s: SessionAgg): string {
         Last {rows.length} transactions
       </p>
     </div>
-    <p class="text-xs text-[var(--color-subtle-foreground)] font-mono">{userHash}</p>
+    <p class="text-xs text-[var(--color-subtle-foreground)] font-mono">{userHash ?? cfEmail ?? "no identity"}</p>
   </div>
+
+  {
+    !userHash && (
+      <div class="mb-6 px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] text-sm text-[var(--color-muted-foreground)]">
+        No Claude Code activity yet under <span class="font-mono text-[var(--color-foreground)]">{cfEmail ?? "this session"}</span>. Run a request through this proxy and refresh — the link is created automatically.
+      </div>
+    )
+  }
 
   {
     loadErr && (
@@ -224,7 +278,11 @@ function sessionModels(s: SessionAgg): string {
         <KpiCard
           label="Cache hit"
           value={`${(cacheRate * 100).toFixed(0)}%`}
-          sub={`${fmtInt(stats.cache_read)} read`}
+          sub={
+            ttlKnown
+              ? `${fmtInt(stats.cache_read)} read · ${longTtlPct.toFixed(0)}% 1h TTL`
+              : `${fmtInt(stats.cache_read)} read`
+          }
           accent="volume"
           sparkValues={sparkCache}
           sparkMode="line"
@@ -271,7 +329,7 @@ function sessionModels(s: SessionAgg): string {
         <p class="text-xs text-[var(--color-subtle-foreground)] mb-4">
           Stacked token composition (log scale) with per-turn cost overlay. Last {chartData.length} turns.
         </p>
-        <TokenChart client:load data={chartData} />
+        <TokenChart client:load initialRows={rows} />
       </section>
     )
   }
@@ -289,7 +347,13 @@ function sessionModels(s: SessionAgg): string {
           {sessionList.slice(0, 8).map((s) => {
             const active = isActive(s);
             return (
-            <div class={`card card-hover p-4 ${active ? "ring-1 ring-[var(--color-good-muted)] ring-offset-0" : ""}`}>
+            <a
+              href={`/session/${s.id}`}
+              class={`card card-hover p-4 block ${active ? "ring-1 ring-[var(--color-good-muted)] ring-offset-0" : ""}`}
+              data-session-card
+              data-session-id={s.id}
+              data-last-ts={s.lastTs}
+            >
               <div class="flex items-baseline justify-between mb-2.5">
                 <div class="flex items-center gap-2">
                   <code class="font-mono text-xs text-[var(--color-volume)]">{shortSession(s.id)}</code>
@@ -321,7 +385,7 @@ function sessionModels(s: SessionAgg): string {
                   </p>
                 </div>
               </div>
-            </div>
+            </a>
           );
           })}
         </div>
@@ -329,96 +393,5 @@ function sessionModels(s: SessionAgg): string {
     )
   }
 
-  <section class="card overflow-hidden" data-live-region="table">
-    <div class="flex items-baseline justify-between px-5 py-4 border-b border-[var(--color-border)]">
-      <h2 class="text-sm font-medium">Recent turns</h2>
-      <span class="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
-        {rows.length} rows
-      </span>
-    </div>
-    {
-      rows.length === 0 ? (
-        <p class="px-5 py-10 text-[var(--color-muted-foreground)] text-sm text-center">
-          No transactions yet. Run <code class="chip mx-0.5">claude</code> against
-          <code class="chip mx-0.5">{domain}</code> to see them here.
-        </p>
-      ) : (
-        <div class="overflow-x-auto">
-          <table class="min-w-full text-[13px]">
-            <thead class="text-[var(--color-muted-foreground)] text-[0.6875rem] uppercase tracking-[0.08em]">
-              <tr>
-                <th class="px-4 py-2.5 text-left font-medium w-3"></th>
-                <th class="px-3 py-2.5 text-left font-medium w-14">When</th>
-                <th class="px-3 py-2.5 text-left font-medium">Model</th>
-                <th class="px-3 py-2.5 text-right font-medium tabular-nums">In</th>
-                <th class="px-3 py-2.5 text-right font-medium tabular-nums">Out</th>
-                <th class="px-3 py-2.5 text-right font-medium tabular-nums">Cache R</th>
-                <th class="px-3 py-2.5 text-right font-medium tabular-nums">Latency</th>
-                <th class="px-3 py-2.5 text-left font-medium">Tools</th>
-                <th class="px-3 py-2.5 text-right font-medium tabular-nums">Cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => {
-                const toolsArr: string[] = r.tools_json ? JSON.parse(r.tools_json) : [];
-                const tools = toolsArr.map(shortToolName);
-                const cost = estimateCostUsd(r);
-                const model = r.model ?? "—";
-                const shortModel = model.replace(/-\d{8}$/, "").replace(/^claude-/, "");
-                return (
-                  <tr class="border-t border-[var(--color-border)] hover:bg-[var(--color-card-elevated)]/60 transition-colors">
-                    <td class="px-4 py-2.5 align-middle">
-                      <span
-                        class={`dot ${stopDotClass(r.stop_reason)}`}
-                        title={r.stop_reason ?? "—"}
-                      ></span>
-                    </td>
-                    <td class="px-3 py-2.5 text-[var(--color-muted-foreground)] font-mono text-xs tabular-nums whitespace-nowrap">
-                      <span data-ts={r.ts}>{fmtAgo(r.ts)}</span>
-                    </td>
-                    <td class="px-3 py-2.5 font-mono text-xs" title={model}>
-                      {shortModel}
-                    </td>
-                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums">
-                      {fmtInt(r.input_tokens)}
-                    </td>
-                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums">
-                      {fmtInt(r.output_tokens)}
-                    </td>
-                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/80">
-                      {fmtInt(r.cache_read)}
-                    </td>
-                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-                      {fmtDuration(r.elapsed_ms)}
-                    </td>
-                    <td class="px-3 py-2.5">
-                      {tools.length === 0 ? (
-                        <span class="text-[var(--color-subtle-foreground)] text-xs">—</span>
-                      ) : (
-                        <div class="flex flex-wrap gap-1 max-w-[22rem]">
-                          {tools.slice(0, 3).map((t) => (
-                            <span class="chip" title={t}>
-                              {t.length > 22 ? t.slice(0, 22) + "…" : t}
-                            </span>
-                          ))}
-                          {tools.length > 3 && (
-                            <span class="chip" title={tools.slice(3).join(", ")}>
-                              +{tools.length - 3}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </td>
-                    <td class="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-[var(--color-money)]">
-                      {fmtUsd(cost)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )
-    }
-  </section>
+  <RecentTurnsTable client:load initialRows={rows} />
 </Base>

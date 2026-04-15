@@ -6,6 +6,8 @@ export type TransactionRow = {
   ts: number;
   session_id: string | null;
   model: string | null;
+  method?: string | null;
+  url?: string | null;
   status: number;
   elapsed_ms: number;
   input_tokens: number;
@@ -16,6 +18,20 @@ export type TransactionRow = {
   tools_json: string | null;
   req_body_bytes: number;
   resp_body_bytes: number;
+  /** Short-TTL (5 min) cache writes — newer API only, may be null. */
+  cache_creation_5m?: number | null;
+  /** Long-TTL (1 hour) cache writes — newer API only, may be null. */
+  cache_creation_1h?: number | null;
+  /** Request-side thinking budget; non-null means extended thinking was enabled. */
+  thinking_budget?: number | null;
+  /** Count of `thinking` content blocks in the response. */
+  thinking_blocks?: number | null;
+  /** Request-side max_tokens ceiling. */
+  max_tokens?: number | null;
+  rl_req_remaining?: number | null;
+  rl_req_limit?: number | null;
+  rl_tok_remaining?: number | null;
+  rl_tok_limit?: number | null;
 };
 
 export type Stats = {
@@ -50,4 +66,10 @@ export function getStats(ns: DurableObjectNamespace, userHash: string) {
 
 export function getRecent(ns: DurableObjectNamespace, userHash: string) {
   return call<TransactionRow[]>(ns, userHash, "/recent");
+}
+
+export type SessionEnds = Record<string, number>;
+
+export function getSessionEnds(ns: DurableObjectNamespace, userHash: string) {
+  return call<SessionEnds>(ns, userHash, "/session/ends");
 }

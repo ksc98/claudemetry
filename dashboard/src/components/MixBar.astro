@@ -1,0 +1,75 @@
+---
+// Horizontal stacked bar + inline legend.
+// Segments with value 0 are dropped so they don't clutter the legend.
+
+interface Segment {
+  label: string;
+  value: number;
+  /** Any valid CSS color — e.g. "var(--color-good)" or "#f00". */
+  color: string;
+}
+
+interface Props {
+  title?: string;
+  segments: Segment[];
+  /** Total to divide by. Defaults to sum of segment values. */
+  total?: number;
+  /** Show the "label N%" legend under the bar. */
+  legend?: boolean;
+  /** Bar height in px. */
+  height?: number;
+}
+
+const { title, segments, total, legend = true, height = 8 } = Astro.props;
+
+const used = segments.filter((s) => s.value > 0);
+const denom = total ?? used.reduce((a, s) => a + s.value, 0);
+const pct = (s: Segment) => (denom > 0 ? (s.value / denom) * 100 : 0);
+---
+
+<div>
+  {title && (
+    <p class="text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)] font-medium mb-2">
+      {title}
+    </p>
+  )}
+
+  {used.length === 0 ? (
+    <div
+      class="rounded-full bg-[var(--color-border)]"
+      style={`height:${height}px;`}
+    />
+  ) : (
+    <div
+      class="flex overflow-hidden rounded-full bg-[var(--color-border)]"
+      style={`height:${height}px;`}
+      role="img"
+      aria-label={used.map((s) => `${s.label} ${Math.round(pct(s))}%`).join(", ")}
+    >
+      {used.map((s) => (
+        <div
+          class="h-full"
+          style={`flex: ${Math.max(pct(s), 1)} 0 0; min-width:2px; background:${s.color};`}
+          title={`${s.label}: ${s.value.toLocaleString()} (${pct(s).toFixed(1)}%)`}
+        />
+      ))}
+    </div>
+  )}
+
+  {legend && used.length > 0 && (
+    <ul class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem] text-[var(--color-muted-foreground)]">
+      {used.map((s) => (
+        <li class="inline-flex items-center gap-1.5 tabular-nums">
+          <span
+            class="inline-block w-2 h-2 rounded-sm"
+            style={`background:${s.color};`}
+          />
+          <span class="text-[var(--color-foreground)]">{s.label}</span>
+          <span class="text-[var(--color-subtle-foreground)]">
+            {pct(s).toFixed(pct(s) < 10 ? 1 : 0)}%
+          </span>
+        </li>
+      ))}
+    </ul>
+  )}
+</div>
