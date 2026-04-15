@@ -20,6 +20,12 @@ const LIMIT_DO_BYTES: f64 = 5.0e9;
 const LIMIT_BUILD_MIN: f64 = 3_000.0;
 const LIMIT_VEC_QUERIED_DIMS: f64 = 50_000_000.0;
 const LIMIT_VEC_STORED_DIMS: f64 = 10_000_000.0;
+// Workers AI on the Paid plan includes 10,000 neurons/day. There's no
+// monthly pool — the daily allocation is multiplied by the number of days
+// in the window to produce an approximate "included" total. Overage is
+// billed at $0.011 per 1,000 neurons.
+// https://developers.cloudflare.com/workers-ai/platform/pricing/
+const AI_NEURONS_PER_DAY: f64 = 10_000.0;
 
 pub(crate) const BAR_WIDTH: usize = 24;
 // Per-Durable-Object SQLite storage hard cap (not the account-wide monthly
@@ -113,6 +119,19 @@ const BUILD_Q: &str = r#"query B($acct:String!,$from:Time!,$to:Time!){
   }}
 }"#;
 
+const AI_Q: &str = r#"query AI($acct:String!,$from:Time!,$to:Time!){
+  viewer{accounts(filter:{accountTag:$acct}){
+    aiInferenceAdaptiveGroups(
+      filter:{datetime_geq:$from,datetime_leq:$to},
+      limit:1000
+    ){
+      sum{totalNeurons}
+      count
+      dimensions{modelId}
+    }
+  }}
+}"#;
+
 pub struct QuotaArgs {
     pub window: String,
     pub api_token: Option<String>,
@@ -144,6 +163,7 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     let vec_queries = gql(&api_token, VEC_QUERIES_Q, &vars)?;
     let vec_storage = gql(&api_token, VEC_STORAGE_Q, &vars)?;
     let builds = gql(&api_token, BUILD_Q, &vars)?;
+    let ai = gql(&api_token, AI_Q, &vars)?;
 
     let ws = aggregate_workers(&workers);
     let dos = aggregate_dos(&do_inv);
@@ -153,6 +173,8 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     let vec_q = aggregate_vec_queries(&vec_queries);
     let vec_s = aggregate_vec_storage(&vec_storage);
     let build_min = sum_build_minutes(&builds);
+    let ai_rows = aggregate_ai(&ai);
+    let window_days = window_days(&from, &to);
 
     println!(
         "{} {} → {} {}",
@@ -172,6 +194,8 @@ pub fn run(args: QuotaArgs) -> Result<()> {
         &vec_q,
         &vec_s,
         build_min,
+        &ai_rows,
+        window_days,
     );
     println!();
     print_workers(&sty, &ws);
@@ -181,6 +205,8 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     print_storage(&sty, &storage);
     println!();
     print_vectorize(&sty, &vec_q, &vec_s);
+    println!();
+    print_workers_ai(&sty, &ai_rows);
 
     Ok(())
 }
@@ -537,6 +563,61 @@ fn aggregate_storage(v: &Value, ns_map: &BTreeMap<String, String>) -> Vec<Storag
         .collect()
 }
 
+struct AiRow {
+    model: String,
+    requests: u64,
+    neurons: f64,
+}
+
+fn aggregate_ai(v: &Value) -> Vec<AiRow> {
+    let rows = account(v)
+        .and_then(|a| a.get("aiInferenceAdaptiveGroups"))
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut by_model: BTreeMap<String, AiRow> = BTreeMap::new();
+    for r in rows {
+        let model = r
+            .pointer("/dimensions/modelId")
+            .and_then(|x| x.as_str())
+            .unwrap_or("__unknown__")
+            .to_string();
+        let entry = by_model.entry(model.clone()).or_insert(AiRow {
+            model,
+            requests: 0,
+            neurons: 0.0,
+        });
+        entry.requests += u64_at(&r, "/count");
+        entry.neurons += f64_at(&r, "/sum/totalNeurons");
+    }
+    let mut out: Vec<_> = by_model.into_values().collect();
+    out.sort_by(|a, b| {
+        b.neurons
+            .partial_cmp(&a.neurons)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out
+}
+
+// Approximate days spanned by the window (for daily-allocated quotas
+// like Workers AI). Times are RFC3339 UTC ("YYYY-MM-DDTHH:MM:SSZ"), so
+// epoch-second diff / 86400 is accurate enough; we also floor at 1 day
+// so a short window still shows a non-zero allocation.
+fn window_days(from: &str, to: &str) -> f64 {
+    let parse = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&chrono::Utc))
+    };
+    match (parse(from), parse(to)) {
+        (Some(f), Some(t)) => {
+            let secs = (t - f).num_seconds().max(0) as f64;
+            (secs / 86_400.0).max(1.0)
+        }
+        _ => 1.0,
+    }
+}
+
 fn sum_build_minutes(v: &Value) -> f64 {
     account(v)
         .and_then(|a| a.get("workersBuildsBuildMinutesAdaptiveGroups"))
@@ -574,6 +655,8 @@ fn print_totals(
     vec_q: &[VecQueryRow],
     vec_s: &[VecStorageRow],
     build_min: f64,
+    ai: &[AiRow],
+    window_days: f64,
 ) {
     let total_req: u64 = ws.iter().map(|w| w.requests).sum();
     let total_err: u64 = ws.iter().map(|w| w.errors).sum();
@@ -592,6 +675,9 @@ fn print_totals(
     let total_do_exceeded_mem: u64 = do_usage.iter().map(|d| d.exceeded_mem).sum();
     let total_vec_queried: u64 = vec_q.iter().map(|v| v.queried_dims).sum();
     let total_vec_stored: u64 = vec_s.iter().map(|v| v.stored_dims).sum();
+    let total_ai_requests: u64 = ai.iter().map(|r| r.requests).sum();
+    let total_ai_neurons: f64 = ai.iter().map(|r| r.neurons).sum();
+    let ai_allocation: f64 = AI_NEURONS_PER_DAY * window_days;
 
     println!("{}", sty.header("ACCOUNT TOTALS"));
     println!(
@@ -652,6 +738,16 @@ fn print_totals(
             human_count(total_vec_stored),
             human_count(LIMIT_VEC_STORED_DIMS as u64),
             total_vec_stored as f64 / LIMIT_VEC_STORED_DIMS,
+        ),
+        (
+            "ai neurons",
+            human_num(total_ai_neurons),
+            human_num(ai_allocation),
+            if ai_allocation > 0.0 {
+                total_ai_neurons / ai_allocation
+            } else {
+                0.0
+            },
         ),
         (
             "build mins",
@@ -729,6 +825,7 @@ fn print_totals(
                 sty.dim("0")
             },
         ),
+        ("ai requests", sty.dim(&human_count(total_ai_requests))),
     ];
     for (label, val) in &info_rows {
         let pad = " ".repeat(label_w - label.len());
@@ -985,6 +1082,46 @@ fn print_vectorize(sty: &Style, vec_q: &[VecQueryRow], vec_s: &[VecStorageRow]) 
                     .unwrap_or_else(|| sty.dim("0")),
                 q.map(|q| human_count(q.duration_ms))
                     .unwrap_or_else(|| sty.dim("0")),
+            ]
+        })
+        .collect();
+
+    print_table(sty, &cols, &rows);
+}
+
+fn print_workers_ai(sty: &Style, ai: &[AiRow]) {
+    println!("{}", sty.header("WORKERS AI (per-model)"));
+    if ai.is_empty() {
+        println!("  {}", sty.dim("(no Workers AI inference in window)"));
+        return;
+    }
+
+    let total_req: u64 = ai.iter().map(|r| r.requests).sum();
+    let total_neurons: f64 = ai.iter().map(|r| r.neurons).sum();
+
+    let cols = [
+        Col { header: "model",    align: Align::Left },
+        Col { header: "requests", align: Align::Right },
+        Col { header: "share",    align: Align::Right },
+        Col { header: "neurons",  align: Align::Right },
+        Col { header: "share",    align: Align::Right },
+    ];
+
+    let rows: Vec<Vec<String>> = ai
+        .iter()
+        .map(|r| {
+            let req_share = frac(r.requests, total_req);
+            let neu_share = if total_neurons > 0.0 {
+                r.neurons / total_neurons
+            } else {
+                0.0
+            };
+            vec![
+                r.model.clone(),
+                human_count(r.requests),
+                sty.dim(&format!("{:.1}%", req_share * 100.0)),
+                human_num(r.neurons),
+                sty.dim(&format!("{:.1}%", neu_share * 100.0)),
             ]
         })
         .collect();
