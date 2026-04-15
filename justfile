@@ -8,6 +8,7 @@ default:
 # Fresh-clone setup: install mise-pinned toolchains + cargo-only extras
 # (wasm32 target, worker-build). Assumes `mise` is installed and activated.
 setup-mise:
+    mise trust
     mise install
     rustup target add wasm32-unknown-unknown
     cargo install worker-build --locked
