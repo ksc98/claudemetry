@@ -11,8 +11,34 @@ use crate::quota::{
 const CC_PROXY_SCRIPT: &str = "cc-proxy";
 
 pub fn do_run(base: &str, token: &str) -> Result<()> {
-    let stats = gh_get(base, token, "/_cm/stats")?;
-    let whoami = gh_get(base, token, "/_cm/whoami")?;
+    // Fire /stats + /whoami + user-count in parallel. stats/whoami go
+    // through the proxy to the DO; user-count hits the CF GraphQL API.
+    // All three are independent — no reason to pay their latencies back
+    // to back.
+    let base_s = base.to_string();
+    let token_s = token.to_string();
+    let b1 = base_s.clone();
+    let t1 = token_s.clone();
+    let b2 = base_s.clone();
+    let t2 = token_s.clone();
+    let results = crate::parallel::scatter::<Value>(vec![
+        Box::new(move || gh_get(&b1, &t1, "/_cm/stats")),
+        Box::new(move || gh_get(&b2, &t2, "/_cm/whoami")),
+        // Wrap user-count into a Value so all three tasks share a return
+        // type. Failures become Null (matches the existing `.unwrap_or(None)`
+        // behavior — user-count is best-effort info, never fatal).
+        Box::new(move || {
+            Ok(match fetch_user_count(CC_PROXY_SCRIPT) {
+                Ok(Some(n)) => json!(n),
+                _ => Value::Null,
+            })
+        }),
+    ]);
+    let mut it = results.into_iter();
+    let stats = it.next().unwrap()?;
+    let whoami = it.next().unwrap()?;
+    let user_count_val = it.next().unwrap()?;
+    let user_count = user_count_val.as_u64();
 
     let user_hash = whoami
         .get("user_hash")
@@ -35,7 +61,6 @@ pub fn do_run(base: &str, token: &str) -> Result<()> {
 
     let sty = Style::new(std::io::stdout().is_terminal());
 
-    let user_count = fetch_user_count(CC_PROXY_SCRIPT).unwrap_or(None);
     let header = match user_count {
         Some(n) => format!("DURABLE OBJECT ({n} user{})", if n == 1 { "" } else { "s" }),
         None => "DURABLE OBJECT".into(),

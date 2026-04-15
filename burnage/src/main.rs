@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod backfill;
+mod parallel;
 mod quota;
 mod search;
 mod shell;

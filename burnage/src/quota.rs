@@ -172,14 +172,6 @@ pub fn run(args: QuotaArgs) -> Result<()> {
     let (from, to, label) = resolve_window(&args.window)?;
     let vars = json!({ "acct": account_id, "from": from, "to": to });
 
-    let workers = gql(&api_token, WORKERS_Q, &vars)?;
-    let do_inv = gql(&api_token, DO_INV_Q, &vars)?;
-    let do_periodic = gql(&api_token, DO_PERIODIC_Q, &vars)?;
-    let do_storage = gql(&api_token, DO_STORAGE_Q, &vars)?;
-    let vec_queries = gql(&api_token, VEC_QUERIES_Q, &vars)?;
-    let vec_storage = gql(&api_token, VEC_STORAGE_Q, &vars)?;
-    let builds = gql(&api_token, BUILD_Q, &vars)?;
-    let ai = gql(&api_token, AI_Q, &vars)?;
     // Workers AI resets at 00:00 UTC, so a separate "today" query tracks
     // the only window that actually matters for the daily allocation.
     let today_from = format!(
@@ -193,7 +185,36 @@ pub fn run(args: QuotaArgs) -> Result<()> {
         "from": today_from,
         "to": to,
     });
-    let ai_today = gql(&api_token, AI_Q, &ai_today_vars)?;
+
+    // Fire all 9 GraphQL queries in parallel — they have no data dependency
+    // on each other. ureq is blocking, so one OS thread per request. Wall
+    // time drops from sum-of-latencies to max-of-latencies (~500ms).
+    let token = api_token.clone();
+    let make_gql = |query: &'static str, v: Value| -> crate::parallel::Task<Value> {
+        let t = token.clone();
+        Box::new(move || gql(&t, query, &v))
+    };
+    let results = crate::parallel::scatter(vec![
+        make_gql(WORKERS_Q, vars.clone()),
+        make_gql(DO_INV_Q, vars.clone()),
+        make_gql(DO_PERIODIC_Q, vars.clone()),
+        make_gql(DO_STORAGE_Q, vars.clone()),
+        make_gql(VEC_QUERIES_Q, vars.clone()),
+        make_gql(VEC_STORAGE_Q, vars.clone()),
+        make_gql(BUILD_Q, vars.clone()),
+        make_gql(AI_Q, vars.clone()),
+        make_gql(AI_Q, ai_today_vars),
+    ]);
+    let mut it = results.into_iter();
+    let workers = it.next().unwrap()?;
+    let do_inv = it.next().unwrap()?;
+    let do_periodic = it.next().unwrap()?;
+    let do_storage = it.next().unwrap()?;
+    let vec_queries = it.next().unwrap()?;
+    let vec_storage = it.next().unwrap()?;
+    let builds = it.next().unwrap()?;
+    let ai = it.next().unwrap()?;
+    let ai_today = it.next().unwrap()?;
 
     let ws = aggregate_workers(&workers);
     let dos = aggregate_dos(&do_inv);
