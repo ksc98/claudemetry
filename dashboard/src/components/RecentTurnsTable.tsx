@@ -1030,11 +1030,6 @@ export default function RecentTurnsTable({
                           /* ── spanned by the when cell's colSpan ── */
                           case "duration":
                           case "model":
-                          case "in":
-                          case "out":
-                          case "cache_read":
-                          case "cache_5m":
-                          case "cache_1h":
                             return null;
                           /* ── every other column → empty cell ── */
                           default:
