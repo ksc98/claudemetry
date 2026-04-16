@@ -223,7 +223,7 @@ Response shape (success):
       "tx_id": "inflight-…",
       "ts": 1776251781393,
       "session_id": "…",
-      "model": "claude-opus-4-6",
+      "model": "claude-opus-4-7",
       "user_snip": "…<mark>foo</mark>…",
       "asst_snip": "…<mark>bar</mark>…",
       "score": 0.033,
@@ -401,7 +401,7 @@ Each transaction emits two structured JSON log lines to `wrangler tail`:
 
 ```json
 {"dir":"req","ts":...,"method":"POST","url":"...","user_hash":"0203…","session_id":"…","body_len":1530}
-{"dir":"resp","ts":...,"status":200,"elapsed_ms":777,"model":"claude-opus-4-6","input_tokens":443,"output_tokens":32,"cache_read":262754,"cache_creation":951,"stop_reason":"end_turn","tx_id":"inflight-…","body_len":2472}
+{"dir":"resp","ts":...,"status":200,"elapsed_ms":777,"model":"claude-opus-4-7","input_tokens":443,"output_tokens":32,"cache_read":262754,"cache_creation":951,"stop_reason":"end_turn","tx_id":"inflight-…","body_len":2472}
 ```
 
 Best-effort operations on the finalize path (embedding + Vectorize upsert)
