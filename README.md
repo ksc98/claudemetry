@@ -245,10 +245,10 @@ a KV round-trip. Over-quota responses are `429` with
 call per turn during `/ingest/finalize`) is **not** rate-limited — turns are
 naturally paced by the upstream Anthropic API.
 
-**Dashboard UI**: the dashboard home page (behind CF Access) has a search
-input that calls `/api/search` and renders results with FTS5 `<mark>` snippet
-highlights, a keyword/semantic/both badge per hit, and a `/` keyboard
-shortcut to focus the input.
+**Dashboard UI**: the dashboard (behind CF Access) has a command palette that
+calls `/api/search` and renders results with FTS5 `<mark>` snippet highlights
+and a keyword/semantic/both badge per hit. Open it from anywhere with `/` or
+`Cmd/Ctrl+K`; arrows navigate hits, Enter opens the selected turn, Esc closes.
 
 Provision the Vectorize index once before first deploy:
 
@@ -427,7 +427,7 @@ for the `user_text` / `assistant_text` search columns) and then discarded.
 - `burnage/` — cross-platform CLI (`whoami`, `stats`, `recent`, `search`, `quota`, `session`, `shell`)
 - `dashboard/` — Astro 6 + React dashboard worker, served behind Cloudflare Access
   - `src/pages/api/search.ts` — thin forwarder: CF Access email → `user_hash` → DO `/search`
-  - `src/components/SearchBox.tsx` — search input with `/` focus hotkey, mode switch, RRF-merged results
+  - `src/components/CommandPalette.tsx` — `/` or `Cmd/Ctrl+K` palette, mode switch, RRF-merged results (hotkey wiring lives in `Sidebar.tsx`)
 - `scripts/cf-access.sh` — idempotent provisioner for the Access apps/policies (`just cf-access`)
 - `justfile` — `local`, `local-tee`, `build`, `login`, `deploy-api`, `tail`, `clean`, `dashboard-dev`, `deploy-frontend`, `dashboard-tail`, `deploy-all`, `cf-access`, `vectorize-create`, `vectorize-info`, `burnage-install`
 
