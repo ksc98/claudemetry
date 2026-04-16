@@ -59,27 +59,12 @@ function shortModel(m: string | null | undefined): string {
   return m.replace(/-\d{8}$/, "").replace(/^claude-/, "");
 }
 
-/**
- * For finalized turns with no model (e.g. count_tokens, token counting),
- * extract a short endpoint label from the URL so the row is identifiable.
- * Returns null for normal model turns or in-flight placeholders.
- */
-function auxEndpoint(tx: TransactionRow): string | null {
-  if (tx.model || tx.in_flight === 1) return null;
-  if (!tx.url) return null;
-  try {
-    const path = new URL(tx.url).pathname;
-    // e.g. "/v1/messages/count_tokens" → "count_tokens"
-    const last = path.split("/").filter(Boolean).pop();
-    return last ?? null;
-  } catch {
-    return null;
-  }
-}
 
 function toTurns(rows: TransactionRow[], sessionId: string): TurnRow[] {
   return rows
     .filter((r) => r.session_id === sessionId)
+    // Filter out auxiliary requests (e.g. count_tokens) — zero tokens, zero cost.
+    .filter((r) => r.model || r.in_flight === 1)
     .sort((a, b) => a.ts - b.ts)
     .map((tx, i) => ({ tx, index: i + 1 }));
 }
@@ -157,14 +142,6 @@ const columns: ColumnDef<TurnRow>[] = [
       const m = tx.model;
       const thought = (tx.thinking_blocks ?? 0) > 0;
       const budget = tx.thinking_budget ?? null;
-      const aux = auxEndpoint(tx);
-      if (aux) {
-        return (
-          <span className="font-mono text-[11px] text-[var(--color-subtle-foreground)] italic whitespace-nowrap">
-            {aux}
-          </span>
-        );
-      }
       return (
         <span
           className={cn(

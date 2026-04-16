@@ -90,24 +90,6 @@ function shortModel(m: string | null | undefined): string {
   return m.replace(/-\d{8}$/, "").replace(/^claude-/, "");
 }
 
-/**
- * For finalized turns with no model (e.g. count_tokens, token counting),
- * extract a short endpoint label from the URL so the row is identifiable.
- * Returns null for normal model turns or in-flight placeholders.
- */
-function auxEndpoint(tx: TransactionRow): string | null {
-  if (tx.model || tx.in_flight === 1) return null;
-  if (!tx.url) return null;
-  try {
-    const path = new URL(tx.url).pathname;
-    // e.g. "/v1/messages/count_tokens" → "count_tokens"
-    const last = path.split("/").filter(Boolean).pop();
-    return last ?? null;
-  } catch {
-    return null;
-  }
-}
-
 // Build groups from pre-aggregated summaries. Header metrics (turns/cost/
 // models) come from the DO's maintained session_summaries view; leaf rows
 // are whatever turns we've actually loaded for that session (active
@@ -119,7 +101,11 @@ function buildGroups(
   return summaries.map((s) => {
     const raw = turnsBySession[s.id] ?? [];
     // Newest-first so the most recent activity is visible without scrolling.
-    const sorted = [...raw].sort((a, b) => b.ts - a.ts);
+    // Filter out auxiliary requests (e.g. count_tokens) — they carry no model,
+    // zero tokens, and zero cost, so they're just noise in the turn list.
+    const sorted = [...raw]
+      .filter((tx) => tx.model || tx.in_flight === 1)
+      .sort((a, b) => b.ts - a.ts);
     const subRows: LeafRow[] = sorted.map((tx, i) => ({
       kind: "leaf",
       id: `l:${tx.tx_id}`,
@@ -233,14 +219,6 @@ const columns: ColumnDef<UIRow>[] = [
       const m = tx.model;
       const thought = (tx.thinking_blocks ?? 0) > 0;
       const budget = tx.thinking_budget ?? null;
-      const aux = auxEndpoint(tx);
-      if (aux) {
-        return (
-          <span className="font-mono text-[11px] text-[var(--color-subtle-foreground)] italic whitespace-nowrap">
-            {aux}
-          </span>
-        );
-      }
       return (
         <span
           className={cn(
