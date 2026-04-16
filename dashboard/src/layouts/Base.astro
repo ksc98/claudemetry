@@ -162,10 +162,14 @@ function fmtBurn(n: number): string {
         const s = Math.max(0, Math.floor(diff / 1000));
         if (s < 60) return `${s}s`;
         const m = Math.floor(s / 60);
-        if (m < 60) return `${m}m`;
+        const rs = s % 60;
+        if (m < 60) return rs > 0 ? `${m}m${rs}s` : `${m}m`;
         const h = Math.floor(m / 60);
-        if (h < 24) return `${h}h`;
-        return `${Math.floor(h / 24)}d`;
+        const rm = m % 60;
+        if (h < 24) return rm > 0 ? `${h}h${rm}m` : `${h}h`;
+        const days = Math.floor(h / 24);
+        const rh = h % 24;
+        return rh > 0 ? `${days}d${rh}h` : `${days}d`;
       }
       function refreshAges() {
         document.querySelectorAll<HTMLElement>("[data-ts]").forEach((el) => {

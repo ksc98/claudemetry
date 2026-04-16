@@ -191,22 +191,36 @@ const columns: ColumnDef<UIRow>[] = [
     },
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.ts : (r as GroupRow).lastTs),
+    accessorFn: (r) => (isLeaf(r) ? r.tx.ts + r.tx.elapsed_ms : (r as GroupRow).lastTs),
     id: "when",
     header: "When",
     sortingFn: "basic",
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
-      const r = row.original.tx;
+      const tx = row.original.tx;
+      const finishedAt = tx.in_flight === 1 ? tx.ts : tx.ts + tx.elapsed_ms;
       return (
         <span
-          data-ts={r.ts}
+          data-ts={finishedAt}
           className="text-[var(--color-muted-foreground)] font-mono text-xs tabular-nums whitespace-nowrap"
         >
-          {fmtAgo(r.ts)}
+          {fmtAgo(finishedAt)}
         </span>
       );
     },
+  },
+  {
+    accessorFn: (r) => (isLeaf(r) ? r.tx.elapsed_ms : 0),
+    id: "duration",
+    header: "Duration",
+    cell: ({ row }) =>
+      isLeaf(row.original) ? (
+        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+          {row.original.tx.in_flight === 1
+            ? "—"
+            : fmtDuration(row.original.tx.elapsed_ms)}
+        </span>
+      ) : null,
   },
   {
     accessorFn: (r) => (isLeaf(r) ? r.tx.model ?? "" : ""),
@@ -363,19 +377,6 @@ const columns: ColumnDef<UIRow>[] = [
     },
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.elapsed_ms : 0),
-    id: "latency",
-    header: "Latency",
-    cell: ({ row }) =>
-      isLeaf(row.original) ? (
-        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-          {row.original.tx.in_flight === 1
-            ? "—"
-            : fmtDuration(row.original.tx.elapsed_ms)}
-        </span>
-      ) : null,
-  },
-  {
     id: "tools",
     header: "Tools",
     enableSorting: false,
@@ -458,7 +459,7 @@ const COLUMN_LABELS: Record<string, string> = {
   cache_read: "Cache read",
   cache_5m: "Cache write 5m",
   cache_1h: "Cache write 1h",
-  latency: "Latency",
+  duration: "Duration",
   tools: "Tools",
   cost: "Cost",
 };
@@ -471,7 +472,7 @@ const RIGHT_ALIGNED_COLS = new Set([
   "cache_read",
   "cache_5m",
   "cache_1h",
-  "latency",
+  "duration",
   "cost",
 ]);
 
@@ -870,7 +871,8 @@ export default function RecentTurnsTable({
                       className={cn(
                         h.id === "expand" && "w-4 pl-4 pr-1",
                         h.id === "dot" && "w-3 px-2",
-                        h.id === "when" && "w-14",
+                        h.id === "when" && "w-16",
+                        h.id === "duration" && "w-16",
                         isRight && "text-right",
                         canSort && "cursor-pointer select-none",
                       )}
@@ -953,17 +955,13 @@ export default function RecentTurnsTable({
                           /* ── dot → empty ── */
                           case "dot":
                             return <TableCell key={colId} className="px-2 w-3" />;
-                          /* ── when → empty ── */
+                          /* ── when → session id + turns + duration + model mix (spans through cache cols) ── */
                           case "when":
-                            return <TableCell key={colId} className="w-14" />;
-                          /* ── model → session id + turns + duration + model mix ── */
-                          case "model":
                             return (
                               <TableCell key={colId} className="py-2" colSpan={
-                                /* span model through cache_read so the group stays compact */
                                 (() => {
-                                  const from = visCols.indexOf("model");
-                                  const spanIds = ["model", "in", "out", "cache_read", "cache_5m", "cache_1h"];
+                                  const from = visCols.indexOf("when");
+                                  const spanIds = ["when", "duration", "model", "in", "out", "cache_read", "cache_5m", "cache_1h"];
                                   let count = 0;
                                   for (let i = from; i < visCols.length; i++) {
                                     if (spanIds.includes(visCols[i])) count++;
@@ -1029,6 +1027,15 @@ export default function RecentTurnsTable({
                                 )}
                               </TableCell>
                             );
+                          /* ── spanned by the when cell's colSpan ── */
+                          case "duration":
+                          case "model":
+                          case "in":
+                          case "out":
+                          case "cache_read":
+                          case "cache_5m":
+                          case "cache_1h":
+                            return null;
                           /* ── every other column → empty cell ── */
                           default:
                             return <TableCell key={colId} />;

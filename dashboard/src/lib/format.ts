@@ -71,9 +71,30 @@ export function fmtAgo(ms: number): string {
   const s = Math.floor(diff / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
+  const rs = s % 60;
+  if (m < 60) return rs > 0 ? `${m}m${rs}s` : `${m}m`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
+  const rm = m % 60;
+  if (h < 24) return rm > 0 ? `${h}h${rm}m` : `${h}h`;
   const days = Math.floor(h / 24);
-  return `${days}d`;
+  const rh = h % 24;
+  return rh > 0 ? `${days}d${rh}h` : `${days}d`;
+}
+
+/** Format a timestamp as a clock time, e.g. "00:52" or "Apr 15 00:52" if not today. */
+export function fmtTime(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const time = `${hh}:${mm}`;
+  if (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  ) {
+    return time;
+  }
+  const mon = d.toLocaleString("en", { month: "short" });
+  return `${mon} ${d.getDate()} ${time}`;
 }

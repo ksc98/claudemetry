@@ -314,9 +314,9 @@ const rateLimit =
           </div>
         </div>
         <p class="text-xs text-[var(--color-subtle-foreground)] mb-4">
-          Stacked token composition (log scale) with per-turn cost overlay. Last {chartData.length} turns.
+          Token composition (log scale) with cost overlay. {chartData.length} turns across {win} window{["24h", "3d", "7d"].includes(win) ? " · avg per turn" : ""}.
         </p>
-        <TokenChart client:load initialRows={rows} />
+        <TokenChart client:load initialRows={rows} window={win} />
       </section>
     )
   }

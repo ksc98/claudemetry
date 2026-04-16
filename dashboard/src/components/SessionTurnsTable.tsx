@@ -116,21 +116,34 @@ const columns: ColumnDef<TurnRow>[] = [
     },
   },
   {
-    accessorFn: (r) => r.tx.ts,
+    accessorFn: (r) => r.tx.ts + r.tx.elapsed_ms,
     id: "when",
     header: "When",
     sortingFn: "basic",
     cell: ({ row }) => {
-      const r = row.original.tx;
+      const tx = row.original.tx;
+      const finishedAt = tx.in_flight === 1 ? tx.ts : tx.ts + tx.elapsed_ms;
       return (
         <span
-          data-ts={r.ts}
+          data-ts={finishedAt}
           className="text-[var(--color-muted-foreground)] font-mono text-xs tabular-nums whitespace-nowrap"
         >
-          {fmtAgo(r.ts)}
+          {fmtAgo(finishedAt)}
         </span>
       );
     },
+  },
+  {
+    accessorFn: (r) => r.tx.elapsed_ms,
+    id: "duration",
+    header: "Duration",
+    cell: ({ row }) => (
+      <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+        {row.original.tx.in_flight === 1
+          ? "—"
+          : fmtDuration(row.original.tx.elapsed_ms)}
+      </span>
+    ),
   },
   {
     accessorFn: (r) => r.tx.model ?? "",
@@ -281,18 +294,6 @@ const columns: ColumnDef<TurnRow>[] = [
     },
   },
   {
-    accessorFn: (r) => r.tx.elapsed_ms,
-    id: "latency",
-    header: "Latency",
-    cell: ({ row }) => (
-      <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
-        {row.original.tx.in_flight === 1
-          ? "—"
-          : fmtDuration(row.original.tx.elapsed_ms)}
-      </span>
-    ),
-  },
-  {
     id: "tools",
     header: "Tools",
     enableSorting: false,
@@ -370,7 +371,7 @@ const COLUMN_LABELS: Record<string, string> = {
   cache_read: "Cache read",
   cache_5m: "Cache write 5m",
   cache_1h: "Cache write 1h",
-  latency: "Latency",
+  duration: "Duration",
   tools: "Tools",
   cost: "Cost",
 };
@@ -381,7 +382,7 @@ const RIGHT_ALIGNED_COLS = new Set([
   "cache_read",
   "cache_5m",
   "cache_1h",
-  "latency",
+  "duration",
   "cost",
 ]);
 
@@ -551,7 +552,8 @@ export default function SessionTurnsTable({
                         h.id === "expand" && "w-4 pl-4 pr-1",
                         h.id === "turn" && "w-10",
                         h.id === "dot" && "w-3 px-2",
-                        h.id === "when" && "w-14",
+                        h.id === "when" && "w-16",
+                        h.id === "duration" && "w-16",
                         isRight && "text-right",
                         canSort && "cursor-pointer select-none",
                       )}

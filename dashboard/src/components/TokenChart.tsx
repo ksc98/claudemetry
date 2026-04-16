@@ -11,6 +11,7 @@ import {
 import type { TransactionRow } from "@/lib/store";
 import { estimateCostUsd } from "@/lib/format";
 import { subscribeRows } from "@/lib/rowsBus";
+import type { Window } from "@/lib/pillWindow";
 
 type Point = {
   ts: number;
@@ -21,12 +22,27 @@ type Point = {
   cost: number;
 };
 
-function rowsToPoints(rows: TransactionRow[]): Point[] {
-  return [...rows]
-    .sort((a, b) => a.ts - b.ts)
+// Bucket sizes per window. Tokens are averaged per turn; cost is summed.
+const BUCKET_MS: Record<Window, number> = {
+  "15m": 0, // individual turns
+  "1h": 0,
+  "24h": 0, // individual turns
+  "3d": 5 * 60_000, // 5 min → ~864 buckets
+  "7d": 5 * 60_000, // 5 min → ~2016 buckets
+};
+
+function rowsToPoints(rows: TransactionRow[], win: Window): Point[] {
+  const filtered = [...rows]
     .filter((r) => r.output_tokens > 0 || r.input_tokens > 50)
-    .slice(-30)
-    .map((r) => ({
+    .sort((a, b) => a.ts - b.ts);
+
+  if (filtered.length === 0) return [];
+
+  const bucketMs = BUCKET_MS[win];
+
+  // Small windows: individual turns.
+  if (bucketMs === 0) {
+    return filtered.map((r) => ({
       ts: r.ts,
       input: Math.max(r.input_tokens, 1),
       output: Math.max(r.output_tokens, 1),
@@ -34,13 +50,57 @@ function rowsToPoints(rows: TransactionRow[]): Point[] {
       cache_creation: Math.max(r.cache_creation, 1),
       cost: estimateCostUsd(r),
     }));
+  }
+
+  // Bucket: average tokens per turn, sum cost.
+  const firstTs = filtered[0].ts;
+  type Acc = Point & { n: number };
+  const buckets = new Map<number, Acc>();
+
+  for (const r of filtered) {
+    const key = firstTs + Math.floor((r.ts - firstTs) / bucketMs) * bucketMs;
+    const existing = buckets.get(key);
+    if (existing) {
+      existing.input += r.input_tokens;
+      existing.output += r.output_tokens;
+      existing.cache_read += r.cache_read;
+      existing.cache_creation += r.cache_creation;
+      existing.cost += estimateCostUsd(r);
+      existing.n += 1;
+    } else {
+      buckets.set(key, {
+        ts: key + bucketMs / 2,
+        input: r.input_tokens,
+        output: r.output_tokens,
+        cache_read: r.cache_read,
+        cache_creation: r.cache_creation,
+        cost: estimateCostUsd(r),
+        n: 1,
+      });
+    }
+  }
+
+  return [...buckets.values()]
+    .sort((a, b) => a.ts - b.ts)
+    .map((p) => ({
+      ts: p.ts,
+      input: Math.max(Math.round(p.input / p.n), 1),
+      output: Math.max(Math.round(p.output / p.n), 1),
+      cache_read: Math.max(Math.round(p.cache_read / p.n), 1),
+      cache_creation: Math.max(Math.round(p.cache_creation / p.n), 1),
+      cost: p.cost,
+    }));
 }
 
-function fmtTs(ms: number): string {
+function fmtTs(ms: number, win: Window): string {
   const d = new Date(ms);
   const h = String(d.getHours()).padStart(2, "0");
   const m = String(d.getMinutes()).padStart(2, "0");
-  return `${h}:${m}`;
+  if (win === "15m" || win === "1h") return `${h}:${m}`;
+  // Longer windows: show date
+  const mon = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${mon}/${day} ${h}:${m}`;
 }
 
 function fmtTokens(n: number): string {
@@ -57,8 +117,10 @@ function fmtUsd(n: number): string {
 
 export default function TokenChart({
   initialRows,
+  window: win = "1h",
 }: {
   initialRows: TransactionRow[];
+  window?: Window;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState<number>(0);
@@ -92,7 +154,7 @@ export default function TokenChart({
     [],
   );
 
-  const data = useMemo(() => rowsToPoints(rows), [rows]);
+  const data = useMemo(() => rowsToPoints(rows, win), [rows, win]);
 
   if (data.length === 0) return null;
   return (
@@ -129,7 +191,7 @@ export default function TokenChart({
           />
           <XAxis
             dataKey="ts"
-            tickFormatter={fmtTs}
+            tickFormatter={(v) => fmtTs(v as number, win)}
             axisLine={false}
             tickLine={false}
             tick={{ fill: "var(--color-muted-foreground)", fontSize: 11 }}
@@ -163,7 +225,7 @@ export default function TokenChart({
               borderRadius: 8,
               fontSize: 12,
             }}
-            labelFormatter={(v) => fmtTs(v as number)}
+            labelFormatter={(v) => fmtTs(v as number, win)}
             formatter={(value, name) => {
               if (name === "cost") return [fmtUsd(value as number), "cost"];
               return [fmtTokens(value as number), name];

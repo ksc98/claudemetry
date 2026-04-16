@@ -188,6 +188,16 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         } else {
             Some(stats.assistant_text.clone())
         };
+        let thinking_text = if stats.thinking_text.is_empty() {
+            None
+        } else {
+            Some(stats.thinking_text.clone())
+        };
+        let tool_calls_json = if stats.tool_calls.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&stats.tool_calls).ok()
+        };
         let (rl_req_remaining, rl_req_limit, rl_tok_remaining, rl_tok_limit) =
             parse_rate_limits(&resp_headers_vec);
 
@@ -233,6 +243,8 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
             anthropic_message_id,
             user_text,
             assistant_text,
+            thinking_text,
+            tool_calls_json,
         };
 
         // Always emit a structured response log so wrangler tail still works.
@@ -682,6 +694,10 @@ impl UserStore {
             // assistant's text_delta stream output.
             ("user_text", "TEXT"),
             ("assistant_text", "TEXT"),
+            // Full thinking content from thinking_delta SSE events.
+            ("thinking_text", "TEXT"),
+            // JSON array of {name, id, input} for each tool call in the turn.
+            ("tool_calls_json", "TEXT"),
         ];
         for (name, typ) in new_cols {
             let _ = sql.exec(
@@ -920,8 +936,8 @@ impl UserStore {
               cache_creation_5m, cache_creation_1h, thinking_budget, thinking_blocks,
               max_tokens, rl_req_remaining, rl_req_limit, rl_tok_remaining, rl_tok_limit,
               in_flight, anthropic_message_id,
-              user_text, assistant_text)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+              user_text, assistant_text, thinking_text, tool_calls_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         );
         sql.exec(
             &stmt,
@@ -955,6 +971,8 @@ impl UserStore {
                 r.anthropic_message_id.clone().into(),
                 r.user_text.clone().into(),
                 r.assistant_text.clone().into(),
+                r.thinking_text.clone().into(),
+                r.tool_calls_json.clone().into(),
             ]),
         )?;
 
@@ -1783,9 +1801,22 @@ struct TransactionRecord {
     /// Concatenated `text_delta` payloads from the assistant's SSE stream.
     #[serde(default)]
     assistant_text: Option<String>,
+    /// Concatenated `thinking_delta` payloads — the model's extended thinking.
+    #[serde(default)]
+    thinking_text: Option<String>,
+    /// JSON array of `{name, id, input}` for each tool call invoked in the turn.
+    #[serde(default)]
+    tool_calls_json: Option<String>,
 }
 
 // ---------- SSE parsing ----------
+
+#[derive(Serialize)]
+struct ToolCall {
+    name: String,
+    id: String,
+    input: String,
+}
 
 #[derive(Default)]
 struct SseStats {
@@ -1800,10 +1831,12 @@ struct SseStats {
     stop_reason: Option<String>,
     tools: Vec<String>,
     thinking_blocks: i64,
-    /// Concatenation of every `text_delta` payload from the stream — the
-    /// assistant's user-facing prose. `thinking_delta` (private reasoning)
-    /// and `input_json_delta` (tool args) are intentionally skipped.
     assistant_text: String,
+    thinking_text: String,
+    /// Structured tool calls with name, id, and full input JSON.
+    tool_calls: Vec<ToolCall>,
+    /// Maps SSE block index → index in `tool_calls` for input accumulation.
+    tool_block_map: Vec<(usize, usize)>,
 }
 
 fn parse_sse_usage(body: &str) -> SseStats {
@@ -1843,12 +1876,16 @@ fn parse_sse_usage(body: &str) -> SseStats {
                 }
             }
             "content_block_start" => {
+                let block_idx = evt.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 if let Some(cb) = evt.get("content_block") {
                     match cb.get("type").and_then(|v| v.as_str()) {
                         Some("tool_use") => {
-                            if let Some(n) = cb.get("name").and_then(|v| v.as_str()) {
-                                stats.tools.push(n.to_string());
-                            }
+                            let name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            stats.tools.push(name.clone());
+                            let tc_idx = stats.tool_calls.len();
+                            stats.tool_calls.push(ToolCall { name, id, input: String::new() });
+                            stats.tool_block_map.push((block_idx, tc_idx));
                         }
                         Some("thinking") => {
                             stats.thinking_blocks += 1;
@@ -1858,22 +1895,30 @@ fn parse_sse_usage(body: &str) -> SseStats {
                 }
             }
             "content_block_delta" => {
-                // Only accumulate plain text output — tool-call JSON and
-                // private thinking deltas are excluded from the search index.
+                let block_idx = evt.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 if let Some(d) = evt.get("delta") {
-                    if d.get("type").and_then(|v| v.as_str()) == Some("text_delta") {
-                        if let Some(t) = d.get("text").and_then(|v| v.as_str()) {
-                            if stats.assistant_text.len() + t.len() <= TEXT_COL_CAP {
+                    match d.get("type").and_then(|v| v.as_str()) {
+                        Some("text_delta") => {
+                            if let Some(t) = d.get("text").and_then(|v| v.as_str()) {
                                 stats.assistant_text.push_str(t);
-                            } else if stats.assistant_text.len() < TEXT_COL_CAP {
-                                let remaining = TEXT_COL_CAP - stats.assistant_text.len();
-                                let mut end = remaining;
-                                while end > 0 && !t.is_char_boundary(end) {
-                                    end -= 1;
-                                }
-                                stats.assistant_text.push_str(&t[..end]);
                             }
                         }
+                        Some("thinking_delta") => {
+                            if let Some(t) = d.get("thinking").and_then(|v| v.as_str()) {
+                                stats.thinking_text.push_str(t);
+                            }
+                        }
+                        Some("input_json_delta") => {
+                            if let Some(t) = d.get("partial_json").and_then(|v| v.as_str()) {
+                                // Find the tool call for this block index.
+                                if let Some((_, tc_idx)) = stats.tool_block_map.iter().find(|(bi, _)| *bi == block_idx) {
+                                    if let Some(tc) = stats.tool_calls.get_mut(*tc_idx) {
+                                        tc.input.push_str(t);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1910,7 +1955,9 @@ fn merge_usage(s: &mut SseStats, u: &serde_json::Value) {
 // Maximum characters we persist per text column. Typical turns are < 10 KB;
 // this cap catches pathological file dumps from tool_result blocks without
 // letting a single DO grow unbounded.
-const TEXT_COL_CAP: usize = 256 * 1024;
+// No cap — DO SQLite's 10 GB limit is the only bound.
+// The truncate_text function is kept as a no-op safety valve
+// in case we ever need to re-enable capping.
 
 #[derive(Default)]
 struct ParsedRequest {
@@ -2059,14 +2106,7 @@ fn extract_user_message_text(content: Option<&serde_json::Value>) -> String {
     out
 }
 
-fn truncate_text(mut s: String) -> String {
-    if s.len() > TEXT_COL_CAP {
-        s.truncate(TEXT_COL_CAP);
-        // Back up to a char boundary so we never leave a split codepoint.
-        while !s.is_char_boundary(s.len()) {
-            s.pop();
-        }
-    }
+fn truncate_text(s: String) -> String {
     s
 }
 
