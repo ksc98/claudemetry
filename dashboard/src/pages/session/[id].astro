@@ -310,7 +310,7 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
         </p>
         <SessionTimelineChart
           client:load
-          initialRows={allRows}
+          initialRows={rows}
           sessionId={sessionId}
         />
       </section>
@@ -333,7 +333,7 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
 
       <SessionTurnsTable
         client:load
-        initialRows={allRows}
+        initialRows={rows}
         sessionId={sessionId}
       />
     </>
