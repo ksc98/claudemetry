@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Loader2, Sparkles } from "lucide-react";
+import { Check, Copy, Loader2, Sparkles } from "lucide-react";
 import type { TransactionRow } from "@/lib/store";
 import { fmtBytes, fmtInt, fmtTs } from "@/lib/format";
 import { shortToolName } from "@/lib/tools";
@@ -58,10 +58,39 @@ export function TurnDetail({ tx: initial }: { tx: TransactionRow }) {
     return () => ctrl.abort();
   }, [initial.tx_id, initial.in_flight, tx]);
 
+  const [copied, setCopied] = React.useState(false);
+
+  const copyJson = React.useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(JSON.stringify(tx, null, 2)).then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      });
+    },
+    [tx],
+  );
+
   const tools: string[] = tx.tools_json ? JSON.parse(tx.tools_json) : [];
   const hasConversation = !!(tx.user_text || tx.assistant_text);
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={copyJson}
+          className={cn(
+            "inline-flex items-center gap-1.5 text-[11px] font-mono px-2 py-1 rounded",
+            "border border-[var(--color-border)] hover:bg-[var(--color-border)]/40 transition-colors",
+            copied
+              ? "text-[var(--color-good)]"
+              : "text-[var(--color-muted-foreground)]",
+          )}
+        >
+          {copied ? <Check size={11} /> : <Copy size={11} />}
+          {copied ? "Copied" : "Copy JSON"}
+        </button>
+      </div>
       {loading && (
         <p className="flex items-center gap-2 text-xs text-[var(--color-subtle-foreground)]">
           <Loader2 size={12} className="animate-spin" />
