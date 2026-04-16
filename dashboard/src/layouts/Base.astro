@@ -53,17 +53,7 @@ function fmtBurn(n: number): string {
     <meta name="robots" content="noindex, nofollow" />
     <title>{title}</title>
     <script is:inline>
-      (function () {
-        try {
-          var m = localStorage.getItem("claudemetry:session-filter");
-          document.documentElement.setAttribute(
-            "data-session-filter",
-            m === "all" ? "all" : "active",
-          );
-        } catch (e) {
-          document.documentElement.setAttribute("data-session-filter", "active");
-        }
-      })();
+      document.documentElement.setAttribute("data-session-filter", "active");
     </script>
   </head>
   <body class="flex min-h-screen">

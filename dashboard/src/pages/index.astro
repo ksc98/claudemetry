@@ -288,8 +288,8 @@ const rateLimit =
     sessionList.length > 0 && (
       <section class="mb-8" data-live-region="sessions">
         <div class="flex items-center justify-between gap-3 mb-3">
-          <h2 class="text-sm font-medium">By session</h2>
           <div class="flex items-center gap-3">
+            <h2 class="text-sm font-medium">By session</h2>
             <div class="session-toggle" role="tablist" aria-label="Filter sessions">
               <button
                 type="button"
@@ -309,11 +309,11 @@ const rateLimit =
                 All
               </button>
             </div>
-            <span class="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
-              <span data-count-when="active">{activeCount} active</span>
-              <span data-count-when="all">{sessionList.length} sessions</span>
-            </span>
           </div>
+          <span class="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
+            <span data-count-when="active">{activeCount} active</span>
+            <span data-count-when="all">{sessionList.length} sessions</span>
+          </span>
         </div>
         {activeCount === 0 && (
           <div
@@ -393,19 +393,14 @@ const rateLimit =
   <RecentTurnsTable client:load initialRows={rows} />
 
   <script is:inline>
-    (function () {
-      document.addEventListener("click", function (e) {
-        const target = e.target;
-        if (!(target instanceof Element)) return;
-        const btn = target.closest("[data-session-filter-btn]");
-        if (!btn) return;
-        e.preventDefault();
-        const mode = btn.getAttribute("data-mode") === "all" ? "all" : "active";
-        document.documentElement.setAttribute("data-session-filter", mode);
-        try {
-          localStorage.setItem("claudemetry:session-filter", mode);
-        } catch (err) {}
-      });
-    })();
+    document.addEventListener("click", function (e) {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      const btn = target.closest("[data-session-filter-btn]");
+      if (!btn) return;
+      e.preventDefault();
+      const mode = btn.getAttribute("data-mode") === "all" ? "all" : "active";
+      document.documentElement.setAttribute("data-session-filter", mode);
+    });
   </script>
 </Base>
