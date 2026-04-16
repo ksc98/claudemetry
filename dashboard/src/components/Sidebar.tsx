@@ -40,6 +40,13 @@ export function Sidebar({
     setCurrentPath(window.location.pathname);
   }, []);
 
+  // 1s tick so relative timestamps ("3s", "1m") update live between polls.
+  const [, setNowTick] = React.useState(0);
+  React.useEffect(() => {
+    const id = window.setInterval(() => setNowTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   // Poll /api/sessions.json to keep the list live.
   React.useEffect(() => {
     let cancelled = false;
