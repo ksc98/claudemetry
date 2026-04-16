@@ -100,14 +100,14 @@ function buildGroups(
 ): GroupRow[] {
   return summaries.map((s) => {
     const raw = turnsBySession[s.id] ?? [];
-    // Chronological within a group so the "show more" reveal makes sense.
-    const sortedAsc = [...raw].sort((a, b) => a.ts - b.ts);
-    const subRows: LeafRow[] = sortedAsc.map((tx, i) => ({
+    // Newest first so the latest turn is always visible at the top.
+    const sorted = [...raw].sort((a, b) => b.ts - a.ts);
+    const subRows: LeafRow[] = sorted.map((tx, i) => ({
       kind: "leaf",
       id: `l:${tx.tx_id}`,
       tx,
       posInGroup: i,
-      groupSize: sortedAsc.length,
+      groupSize: sorted.length,
     }));
     const models = new Map<string, number>();
     for (const m of s.models) models.set(m.model, m.turns);
