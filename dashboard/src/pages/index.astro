@@ -8,10 +8,21 @@ import Sparkline from "@/components/Sparkline.astro";
 import TokenChart from "@/components/TokenChart";
 import RecentTurnsTable from "@/components/RecentTurnsTable";
 import RowsPoller from "@/components/RowsPoller";
+import TimeWindowPill from "@/components/TimeWindowPill";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
-import { getStats, getRecent, getSessionEnds, type TransactionRow, type SessionEnds } from "@/lib/store";
-import { buildSessionList } from "@/lib/sessions";
+import {
+  getStats,
+  getRecent,
+  getSessionEnds,
+  getSessionsSummary,
+  getSessionTurns,
+  type TransactionRow,
+  type SessionEnds,
+  type SessionModelBucket,
+} from "@/lib/store";
+import { buildSessionListFromSummary } from "@/lib/sessions";
+import { parseWindow, windowSince } from "@/lib/pillWindow";
 import { estimateCostUsd, fmtInt, fmtUsd, fmtAgo, fmtDuration } from "@/lib/format";
 import {
   MessageSquare,
@@ -34,21 +45,45 @@ const userHash = linked ?? cookieHash;
 
 const ns = env.USER_STORE;
 
+// Pill window (default 1h) — drives stats/recent `since` filter so every
+// KPI + sparkline + chart on the page reflects the same time range.
+const win = parseWindow(Astro.url.searchParams);
+const sinceMs = windowSince(win);
+
 let stats: Awaited<ReturnType<typeof getStats>> | null = null;
 let rows: TransactionRow[] = [];
 let sessionEnds: SessionEnds = {};
+let sessionBuckets: SessionModelBucket[] = [];
 let loadErr: string | null = null;
 if (userHash) {
   try {
-    [stats, rows, sessionEnds] = await Promise.all([
-      getStats(ns, userHash),
-      getRecent(ns, userHash),
+    [stats, rows, sessionBuckets, sessionEnds] = await Promise.all([
+      getStats(ns, userHash, sinceMs),
+      getRecent(ns, userHash, sinceMs),
+      getSessionsSummary(ns, userHash),
       getSessionEnds(ns, userHash),
     ]);
   } catch (e) {
     loadErr = e instanceof Error ? e.message : String(e);
   }
 }
+
+// Session list is always full-history (time-independent); the pill only
+// affects time-scoped stats/graphs, not the inventory of sessions.
+const sessionList = buildSessionListFromSummary(sessionBuckets, sessionEnds);
+
+// Eagerly fetch turns for active sessions so the recent-turns table can
+// render their turns on first paint. Collapsed sessions wait for a click.
+const activeSessionIds = sessionList.filter((s) => s.active).map((s) => s.id);
+const activeTurnsResults = userHash && activeSessionIds.length > 0
+  ? await Promise.all(
+      activeSessionIds.map((id) => getSessionTurns(ns, userHash, id).catch(() => [] as TransactionRow[])),
+    )
+  : [];
+const initialTurns: Record<string, TransactionRow[]> = {};
+activeSessionIds.forEach((id, i) => {
+  initialTurns[id] = activeTurnsResults[i] ?? [];
+});
 
 // Chronological: oldest → newest for chart + rolling sparklines
 const chron = [...rows].sort((a, b) => a.ts - b.ts);
@@ -120,8 +155,6 @@ const chartData = chron
     cost: estimateCostUsd(r),
   }));
 
-// Attribute rows to sessions (shared aggregator used by sidebar too).
-const sessionList = buildSessionList(rows, sessionEnds);
 const activeSession = sessionList.find((s) => s.active) ?? null;
 const activeCount = sessionList.filter((s) => s.active).length;
 // Render enough cards so Active mode shows every active session,
@@ -175,15 +208,18 @@ const rateLimit =
   }}
   sessions={sessionList}
 >
-  <RowsPoller client:load intervalMs={1000} />
-  <div class="mb-7 flex items-baseline justify-between">
+  <RowsPoller client:load intervalMs={1000} windowed={true} />
+  <div class="mb-7 flex items-center justify-between gap-4 flex-wrap">
     <div>
       <h1 class="text-2xl font-semibold tracking-tight">Overview</h1>
       <p class="text-xs text-[var(--color-subtle-foreground)] mt-1">
-        Last {rows.length} transactions
+        Last {rows.length} transactions · {win} window
       </p>
     </div>
-    <p class="text-xs text-[var(--color-subtle-foreground)] font-mono">{userHash ?? cfEmail ?? "no identity"}</p>
+    <div class="flex items-center gap-3">
+      <TimeWindowPill client:load />
+      <p class="text-xs text-[var(--color-subtle-foreground)] font-mono">{userHash ?? cfEmail ?? "no identity"}</p>
+    </div>
   </div>
 
   {
@@ -390,7 +426,12 @@ const rateLimit =
   }
 
 
-  <RecentTurnsTable client:load initialRows={rows} />
+  <RecentTurnsTable
+    client:load
+    summaries={sessionList}
+    initialTurns={initialTurns}
+    windowedRows={rows}
+  />
 
   <script is:inline>
     document.addEventListener("click", function (e) {

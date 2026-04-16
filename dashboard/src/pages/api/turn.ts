@@ -2,12 +2,11 @@ import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
-import { getSessionsSummary, getSessionEnds } from "@/lib/store";
-import { buildSessionListFromSummary } from "@/lib/sessions";
+import { getTurn } from "@/lib/store";
 
 export const prerender = false;
 
-export const GET: APIRoute = async ({ request }) => {
+export const GET: APIRoute = async ({ request, url }) => {
   const cfEmail = readCfAccessEmail(request);
   const linked = await getLinkedHash(env.SESSION, cfEmail);
   const cookieHash = readUserHash(request.headers.get("cookie"));
@@ -18,13 +17,16 @@ export const GET: APIRoute = async ({ request }) => {
       headers: { "content-type": "application/json" },
     });
   }
+  const id = url.searchParams.get("id");
+  if (!id) {
+    return new Response(JSON.stringify({ error: "missing id" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
   try {
-    const [buckets, sessionEnds] = await Promise.all([
-      getSessionsSummary(env.USER_STORE, userHash),
-      getSessionEnds(env.USER_STORE, userHash),
-    ]);
-    const sessions = buildSessionListFromSummary(buckets, sessionEnds);
-    return new Response(JSON.stringify(sessions), {
+    const row = await getTurn(env.USER_STORE, userHash, id);
+    return new Response(JSON.stringify(row), {
       status: 200,
       headers: {
         "content-type": "application/json",

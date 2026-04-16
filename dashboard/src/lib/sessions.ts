@@ -1,4 +1,4 @@
-import type { SessionEnds, TransactionRow } from "@/lib/store";
+import type { SessionEnds, SessionModelBucket } from "@/lib/store";
 import { estimateCostUsd } from "@/lib/format";
 
 // A session is "active" if its most recent turn lands within this window
@@ -14,10 +14,17 @@ export type SessionSummary = {
   active: boolean;
   topModel: string | null;
   modelCount: number;
+  /** Per-model turn counts (short names), for the table's mix-bar swatches. */
+  models: Array<{ model: string; turns: number }>;
 };
 
-export function buildSessionList(
-  rows: TransactionRow[],
+const shortModel = (m: string): string =>
+  m.replace(/-\d{8}$/, "").replace(/^claude-/, "");
+
+// Build the session list directly from the DO's /sessions/summary aggregate.
+// Cost is summed per (session, model) bucket via the client-side pricing table.
+export function buildSessionListFromSummary(
+  buckets: SessionModelBucket[],
   sessionEnds: SessionEnds,
 ): SessionSummary[] {
   type Agg = {
@@ -26,29 +33,43 @@ export function buildSessionList(
     firstTs: number;
     lastTs: number;
     cost: number;
+    topModel: string | null;
+    topModelTurns: number;
     models: Map<string, number>;
   };
   const map = new Map<string, Agg>();
-  for (const r of rows) {
-    if (!r.session_id) continue;
+  for (const b of buckets) {
     const cur =
-      map.get(r.session_id) ??
+      map.get(b.session_id) ??
       ({
-        id: r.session_id,
+        id: b.session_id,
         turns: 0,
-        firstTs: r.ts,
-        lastTs: r.ts,
+        firstTs: b.first_ts,
+        lastTs: b.last_ts,
         cost: 0,
-        models: new Map(),
+        topModel: null,
+        topModelTurns: 0,
+        models: new Map<string, number>(),
       } satisfies Agg);
-    cur.turns += 1;
-    cur.firstTs = Math.min(cur.firstTs, r.ts);
-    cur.lastTs = Math.max(cur.lastTs, r.ts);
-    cur.cost += estimateCostUsd(r);
-    if (r.model) {
-      cur.models.set(r.model, (cur.models.get(r.model) ?? 0) + 1);
+    cur.turns += b.turns;
+    cur.firstTs = Math.min(cur.firstTs, b.first_ts);
+    cur.lastTs = Math.max(cur.lastTs, b.last_ts);
+    cur.cost += estimateCostUsd({
+      model: b.model,
+      input_tokens: b.input_tokens,
+      output_tokens: b.output_tokens,
+      cache_read: b.cache_read,
+      cache_creation: b.cache_creation,
+    });
+    if (b.model) {
+      const short = shortModel(b.model);
+      cur.models.set(short, (cur.models.get(short) ?? 0) + b.turns);
+      if (b.turns > cur.topModelTurns) {
+        cur.topModel = short;
+        cur.topModelTurns = b.turns;
+      }
     }
-    map.set(r.session_id, cur);
+    map.set(b.session_id, cur);
   }
 
   const now = Date.now();
@@ -58,23 +79,20 @@ export function buildSessionList(
     return endedAt == null || endedAt < s.lastTs;
   };
 
-  const shortModel = (m: string): string =>
-    m.replace(/-\d{8}$/, "").replace(/^claude-/, "");
-
   return [...map.values()]
-    .map((agg) => {
-      const top = [...agg.models.entries()].sort((a, b) => b[1] - a[1])[0];
-      return {
-        id: agg.id,
-        turns: agg.turns,
-        costUsd: agg.cost,
-        firstTs: agg.firstTs,
-        lastTs: agg.lastTs,
-        active: isActive(agg),
-        topModel: top ? shortModel(top[0]) : null,
-        modelCount: agg.models.size,
-      } satisfies SessionSummary;
-    })
+    .map((agg) => ({
+      id: agg.id,
+      turns: agg.turns,
+      costUsd: agg.cost,
+      firstTs: agg.firstTs,
+      lastTs: agg.lastTs,
+      active: isActive(agg),
+      topModel: agg.topModel,
+      modelCount: agg.models.size,
+      models: [...agg.models.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([model, turns]) => ({ model, turns })),
+    }))
     .sort((a, b) => {
       const aa = a.active ? 1 : 0;
       const ba = b.active ? 1 : 0;

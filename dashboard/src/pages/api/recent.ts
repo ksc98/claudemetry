@@ -6,7 +6,7 @@ import { getRecent } from "@/lib/store";
 
 export const prerender = false;
 
-export const GET: APIRoute = async ({ request }) => {
+export const GET: APIRoute = async ({ request, url }) => {
   const cfEmail = readCfAccessEmail(request);
   const linked = await getLinkedHash(env.SESSION, cfEmail);
   const cookieHash = readUserHash(request.headers.get("cookie"));
@@ -17,8 +17,10 @@ export const GET: APIRoute = async ({ request }) => {
       headers: { "content-type": "application/json" },
     });
   }
+  const sinceRaw = url.searchParams.get("since");
+  const since = sinceRaw != null ? Number(sinceRaw) : undefined;
   try {
-    const rows = await getRecent(env.USER_STORE, userHash);
+    const rows = await getRecent(env.USER_STORE, userHash, since);
     return new Response(JSON.stringify(rows), {
       status: 200,
       headers: {

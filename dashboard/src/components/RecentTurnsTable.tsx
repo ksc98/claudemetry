@@ -40,6 +40,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { TransactionRow } from "@/lib/store";
+import type { SessionSummary } from "@/lib/sessions";
 import {
   estimateCostUsd,
   fmtAgo,
@@ -89,51 +90,39 @@ function shortModel(m: string | null | undefined): string {
   return m.replace(/-\d{8}$/, "").replace(/^claude-/, "");
 }
 
-function buildGroups(rows: TransactionRow[]): GroupRow[] {
-  const groups: GroupRow[] = [];
-  const idx = new Map<string, number>();
-  for (const r of rows) {
-    const sid = r.session_id ?? "__unlinked__";
-    let i = idx.get(sid);
-    if (i === undefined) {
-      groups.push({
-        kind: "group",
-        id: `g:${sid}`,
-        sessionId: r.session_id,
-        turns: 0,
-        firstTs: r.ts,
-        lastTs: r.ts,
-        cost: 0,
-        subRows: [],
-        models: new Map(),
-      });
-      i = groups.length - 1;
-      idx.set(sid, i);
-    }
-    const g = groups[i];
-    g.subRows.push({
+// Build groups from pre-aggregated summaries. Header metrics (turns/cost/
+// models) come from the DO's maintained session_summaries view; leaf rows
+// are whatever turns we've actually loaded for that session (active
+// sessions on page load, or any session the user has expanded).
+function buildGroups(
+  summaries: SessionSummary[],
+  turnsBySession: Record<string, TransactionRow[]>,
+): GroupRow[] {
+  return summaries.map((s) => {
+    const raw = turnsBySession[s.id] ?? [];
+    // Chronological within a group so the "show more" reveal makes sense.
+    const sortedAsc = [...raw].sort((a, b) => a.ts - b.ts);
+    const subRows: LeafRow[] = sortedAsc.map((tx, i) => ({
       kind: "leaf",
-      id: `l:${r.tx_id}`,
-      tx: r,
-      posInGroup: 0,
-      groupSize: 0,
-    });
-    g.turns += 1;
-    g.firstTs = Math.min(g.firstTs, r.ts);
-    g.lastTs = Math.max(g.lastTs, r.ts);
-    g.cost += estimateCostUsd(r);
-    if (r.model) {
-      const short = r.model.replace(/-\d{8}$/, "").replace(/^claude-/, "");
-      g.models.set(short, (g.models.get(short) ?? 0) + 1);
-    }
-  }
-  for (const g of groups) {
-    g.subRows.forEach((lr, i) => {
-      lr.posInGroup = i;
-      lr.groupSize = g.subRows.length;
-    });
-  }
-  return groups;
+      id: `l:${tx.tx_id}`,
+      tx,
+      posInGroup: i,
+      groupSize: sortedAsc.length,
+    }));
+    const models = new Map<string, number>();
+    for (const m of s.models) models.set(m.model, m.turns);
+    return {
+      kind: "group",
+      id: `g:${s.id}`,
+      sessionId: s.id,
+      turns: s.turns,
+      firstTs: s.firstTs,
+      lastTs: s.lastTs,
+      cost: s.costUsd,
+      subRows,
+      models,
+    } satisfies GroupRow;
+  });
 }
 
 const isLeaf = (r: UIRow): r is LeafRow => r.kind === "leaf";
@@ -463,27 +452,35 @@ function parentIdFor(leaf: LeafRow): string {
   return `g:${leaf.tx.session_id ?? "__unlinked__"}`;
 }
 
+function initialExpanded(summaries: SessionSummary[]): Record<string, boolean> {
+  const now = Date.now();
+  const out: Record<string, boolean> = {};
+  for (let i = 0; i < summaries.length; i++) {
+    const s = summaries[i];
+    if (i === 0 || now - s.lastTs < ACTIVE_WINDOW_MS) out[`g:${s.id}`] = true;
+  }
+  return out;
+}
+
 export default function RecentTurnsTable({
-  initialRows,
+  summaries: initialSummaries,
+  initialTurns,
 }: {
-  initialRows: TransactionRow[];
+  summaries: SessionSummary[];
+  initialTurns: Record<string, TransactionRow[]>;
+  /** Initial pill-windowed rows (merged into turnsBySession for active sessions). */
+  windowedRows?: TransactionRow[];
 }) {
-  const [rows, setRows] = React.useState<TransactionRow[]>(initialRows);
-  const autoExpanded = React.useRef<Set<string>>(new Set());
-  const [expanded, setExpanded] = React.useState<ExpandedState>(() => {
-    const now = Date.now();
-    const groups = buildGroups(initialRows);
-    const out: Record<string, boolean> = {};
-    for (let i = 0; i < groups.length; i++) {
-      const g = groups[i];
-      const active = now - g.lastTs < ACTIVE_WINDOW_MS;
-      if (i === 0 || active) out[g.id] = true;
-      if (active) autoExpanded.current.add(g.id);
-    }
-    return out;
-  });
+  const [summaries, setSummaries] =
+    React.useState<SessionSummary[]>(initialSummaries);
+  const [turnsBySession, setTurnsBySession] = React.useState<
+    Record<string, TransactionRow[]>
+  >(() => ({ ...initialTurns }));
+  const [expanded, setExpanded] = React.useState<ExpandedState>(() =>
+    initialExpanded(initialSummaries),
+  );
   const seenIds = React.useRef<Set<string>>(
-    new Set(buildGroups(initialRows).map((g) => g.id)),
+    new Set(initialSummaries.map((s) => `g:${s.id}`)),
   );
   const [sorting, setSorting] = React.useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = React.useState("");
@@ -491,6 +488,9 @@ export default function RecentTurnsTable({
     React.useState<VisibilityState>({});
   const [shownMap, setShownMap] = React.useState<Record<string, number>>({});
   const [expandedLeaves, setExpandedLeaves] = React.useState<Record<string, boolean>>({});
+  const [loadingSessions, setLoadingSessions] = React.useState<Set<string>>(
+    () => new Set(),
+  );
   const toggleLeaf = React.useCallback((txId: string) => {
     setExpandedLeaves((p) => ({ ...p, [txId]: !p[txId] }));
   }, []);
@@ -517,36 +517,102 @@ export default function RecentTurnsTable({
     setShownMap((p) => ({ ...p, [id]: HIDDEN_PER_GROUP }));
   }, []);
 
-  React.useEffect(() => subscribeRows(setRows), []);
+  // Poll the sidebar's sessions endpoint on the same cadence as Sidebar.tsx
+  // (5 s) so the session headers stay current — turns count, cost, active
+  // state, and ordering all come from summaries, not from raw rows.
+  React.useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      try {
+        const res = await fetch("/api/sessions.json", { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as SessionSummary[];
+        if (!cancelled && Array.isArray(data)) setSummaries(data);
+      } catch {
+        /* next tick */
+      }
+    };
+    const iv = window.setInterval(tick, 5000);
+    const onVis = () => {
+      if (!document.hidden) void tick();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      window.clearInterval(iv);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
-  const handleExpandedChange = React.useCallback(
-    (updater: React.SetStateAction<ExpandedState>) => {
-      setExpanded((prev) => {
-        const next =
-          typeof updater === "function"
-            ? (updater as (p: ExpandedState) => ExpandedState)(prev)
-            : updater;
-        if (
-          typeof prev === "object" &&
-          prev != null &&
-          typeof next === "object" &&
-          next != null
-        ) {
-          const p = prev as Record<string, boolean>;
-          const n = next as Record<string, boolean>;
-          const keys = new Set([...Object.keys(p), ...Object.keys(n)]);
-          for (const k of keys) {
-            if (!!p[k] !== !!n[k]) autoExpanded.current.delete(k);
+  // Merge live windowed rows (from the /api/recent poll) into the sessions
+  // we've already loaded. Collapsed sessions stay collapsed with no
+  // turn-level data — nothing from the bus loads them implicitly.
+  React.useEffect(() => {
+    return subscribeRows((rows) => {
+      setTurnsBySession((prev) => {
+        const next = { ...prev };
+        const touched = new Set<string>();
+        for (const r of rows) {
+          if (!r.session_id) continue;
+          if (!(r.session_id in next)) continue; // never auto-load collapsed
+          touched.add(r.session_id);
+        }
+        for (const sid of touched) {
+          const byId = new Map<string, TransactionRow>();
+          for (const r of next[sid] ?? []) byId.set(r.tx_id, r);
+          for (const r of rows) {
+            if (r.session_id === sid) byId.set(r.tx_id, r);
           }
+          next[sid] = [...byId.values()];
         }
         return next;
+      });
+    });
+  }, []);
+
+  // Lazy-fetch turns for a session on first expand. Idempotent; subsequent
+  // expands of the same session hit the in-memory cache.
+  const ensureTurns = React.useCallback(
+    (sessionId: string) => {
+      setTurnsBySession((prev) => {
+        if (sessionId in prev) return prev;
+        setLoadingSessions((s) => {
+          const next = new Set(s);
+          next.add(sessionId);
+          return next;
+        });
+        fetch(`/api/session/turns?id=${encodeURIComponent(sessionId)}`, {
+          cache: "no-store",
+        })
+          .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+          .then((rows: TransactionRow[]) => {
+            setTurnsBySession((p) => ({ ...p, [sessionId]: rows }));
+          })
+          .catch(() => {
+            setTurnsBySession((p) => ({ ...p, [sessionId]: [] }));
+          })
+          .finally(() => {
+            setLoadingSessions((s) => {
+              if (!s.has(sessionId)) return s;
+              const next = new Set(s);
+              next.delete(sessionId);
+              return next;
+            });
+          });
+        return { ...prev, [sessionId]: [] };
       });
     },
     [],
   );
 
-  const data = React.useMemo(() => buildGroups(rows), [rows]);
+  const data = React.useMemo(
+    () => buildGroups(summaries, turnsBySession),
+    [summaries, turnsBySession],
+  );
 
+  // Auto-expand any newly-appeared active sessions, mirroring the old
+  // behavior when rows flowed in from the global /recent dump.
   React.useEffect(() => {
     setExpanded((prev) => {
       if (typeof prev !== "object" || prev == null) return prev;
@@ -554,48 +620,29 @@ export default function RecentTurnsTable({
       const p = prev as Record<string, boolean>;
       const next = { ...p };
       let changed = false;
-      for (const g of data) {
-        const active = now - g.lastTs < ACTIVE_WINDOW_MS;
-        if (!seenIds.current.has(g.id)) {
-          seenIds.current.add(g.id);
-          if (active) {
-            next[g.id] = true;
-            autoExpanded.current.add(g.id);
-            changed = true;
-          }
-        } else if (!active && p[g.id] && autoExpanded.current.has(g.id)) {
-          delete next[g.id];
-          autoExpanded.current.delete(g.id);
+      for (const s of summaries) {
+        const gid = `g:${s.id}`;
+        if (seenIds.current.has(gid)) continue;
+        seenIds.current.add(gid);
+        if (now - s.lastTs < ACTIVE_WINDOW_MS) {
+          next[gid] = true;
           changed = true;
         }
       }
       return changed ? next : prev;
     });
-  }, [data]);
+  }, [summaries]);
 
+  // When a group is expanded but has no loaded turns, fire the lazy fetch.
   React.useEffect(() => {
-    const tick = () => {
-      setExpanded((prev) => {
-        if (typeof prev !== "object" || prev == null) return prev;
-        const now = Date.now();
-        const p = prev as Record<string, boolean>;
-        const next = { ...p };
-        let changed = false;
-        for (const g of data) {
-          if (!p[g.id]) continue;
-          if (!autoExpanded.current.has(g.id)) continue;
-          if (now - g.lastTs >= ACTIVE_WINDOW_MS) {
-            delete next[g.id];
-            autoExpanded.current.delete(g.id);
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
-    };
-    const id = setInterval(tick, 30_000);
-    return () => clearInterval(id);
-  }, [data]);
+    if (typeof expanded !== "object" || expanded == null) return;
+    for (const [gid, open] of Object.entries(expanded)) {
+      if (!open) continue;
+      const sid = gid.startsWith("g:") ? gid.slice(2) : null;
+      if (!sid) continue;
+      if (!(sid in turnsBySession)) ensureTurns(sid);
+    }
+  }, [expanded, turnsBySession, ensureTurns]);
 
   const table = useReactTable({
     data: data as unknown as UIRow[],
@@ -603,7 +650,7 @@ export default function RecentTurnsTable({
     state: { expanded, sorting, globalFilter, columnVisibility },
     getRowId: (r) => r.id,
     getSubRows: (r) => (r.kind === "group" ? (r as GroupRow).subRows : undefined),
-    onExpandedChange: handleExpandedChange,
+    onExpandedChange: setExpanded,
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
     onColumnVisibilityChange: setColumnVisibility,
@@ -733,7 +780,7 @@ export default function RecentTurnsTable({
         </div>
       </div>
 
-      {rows.length === 0 ? (
+      {summaries.length === 0 ? (
         <p className="px-5 py-10 text-[var(--color-muted-foreground)] text-sm text-center">
           No transactions yet.
         </p>
@@ -880,6 +927,29 @@ export default function RecentTurnsTable({
                       </TableCell>
                     </TableRow>,
                   );
+                  const sidForLoad = g.sessionId;
+                  const open = row.getIsExpanded();
+                  const subCount = (g.subRows ?? []).length;
+                  if (open && subCount === 0 && sidForLoad) {
+                    out.push(
+                      <TableRow
+                        key={`${row.id}:load`}
+                        className="hover:bg-transparent"
+                      >
+                        <TableCell
+                          colSpan={visibleColCount}
+                          className="py-3 text-center text-xs text-[var(--color-subtle-foreground)]"
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <Loader2 size={12} className="animate-spin" />
+                            {loadingSessions.has(sidForLoad)
+                              ? "Loading turns…"
+                              : "No turns loaded"}
+                          </span>
+                        </TableCell>
+                      </TableRow>,
+                    );
+                  }
                   continue;
                 }
                 const pid = parentIdFor(row.original);

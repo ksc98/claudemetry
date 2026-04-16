@@ -15,7 +15,8 @@ export type TransactionRow = {
   cache_read: number;
   cache_creation: number;
   stop_reason: string | null;
-  tools_json: string | null;
+  /** Only present on /turn (detail fetch); list endpoints omit it. */
+  tools_json?: string | null;
   req_body_bytes: number;
   resp_body_bytes: number;
   /** Short-TTL (5 min) cache writes — newer API only, may be null. */
@@ -36,10 +37,9 @@ export type TransactionRow = {
   in_flight?: number | null;
   /** Anthropic's `message.id` (set on finalize). Row PK `tx_id` is a stable synthetic id. */
   anthropic_message_id?: string | null;
-  /** Last user-role message text (prose + tool_result content). Populated on finalize;
-   *  indexed by FTS5 and embedded for Vectorize. */
+  /** Only present on /turn (detail fetch); list endpoints omit it. */
   user_text?: string | null;
-  /** Concatenated assistant text_delta stream output — excludes thinking + tool args. */
+  /** Only present on /turn (detail fetch); list endpoints omit it. */
   assistant_text?: string | null;
 };
 
@@ -53,32 +53,106 @@ export type Stats = {
   last_ts: number | null;
 };
 
+/** One row per (session_id, model) returned by /sessions/summary. */
+export type SessionModelBucket = {
+  session_id: string;
+  model: string | null;
+  turns: number;
+  first_ts: number;
+  last_ts: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_creation: number;
+};
+
 function stubFor(ns: DurableObjectNamespace, userHash: string) {
   const id = ns.idFromName(userHash);
   return ns.get(id);
 }
 
-async function call<T>(
+async function callGet<T>(
   ns: DurableObjectNamespace,
   userHash: string,
   path: string,
+  query?: Record<string, string | number | undefined>,
 ): Promise<T> {
   const stub = stubFor(ns, userHash);
-  const res = await stub.fetch(`https://store${path}`);
+  let url = `https://store${path}`;
+  if (query) {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v != null) qs.set(k, String(v));
+    }
+    const s = qs.toString();
+    if (s) url += `?${s}`;
+  }
+  const res = await stub.fetch(url);
   if (!res.ok) throw new Error(`DO ${path} ${res.status}`);
   return (await res.json()) as T;
 }
 
-export function getStats(ns: DurableObjectNamespace, userHash: string) {
-  return call<Stats>(ns, userHash, "/stats");
+async function callPost<T>(
+  ns: DurableObjectNamespace,
+  userHash: string,
+  path: string,
+  body: unknown,
+): Promise<T> {
+  const stub = stubFor(ns, userHash);
+  const res = await stub.fetch(`https://store${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`DO ${path} ${res.status}`);
+  return (await res.json()) as T;
 }
 
-export function getRecent(ns: DurableObjectNamespace, userHash: string) {
-  return call<TransactionRow[]>(ns, userHash, "/recent");
+export function getStats(
+  ns: DurableObjectNamespace,
+  userHash: string,
+  since?: number,
+) {
+  return callGet<Stats>(ns, userHash, "/stats", { since });
+}
+
+export function getRecent(
+  ns: DurableObjectNamespace,
+  userHash: string,
+  since?: number,
+) {
+  return callGet<TransactionRow[]>(ns, userHash, "/recent", { since });
 }
 
 export type SessionEnds = Record<string, number>;
 
 export function getSessionEnds(ns: DurableObjectNamespace, userHash: string) {
-  return call<SessionEnds>(ns, userHash, "/session/ends");
+  return callGet<SessionEnds>(ns, userHash, "/session/ends");
+}
+
+export function getSessionsSummary(
+  ns: DurableObjectNamespace,
+  userHash: string,
+) {
+  return callGet<SessionModelBucket[]>(ns, userHash, "/sessions/summary");
+}
+
+export function getSessionTurns(
+  ns: DurableObjectNamespace,
+  userHash: string,
+  sessionId: string,
+  limit?: number,
+) {
+  return callGet<TransactionRow[]>(ns, userHash, "/session/turns", {
+    id: sessionId,
+    limit,
+  });
+}
+
+export function getTurn(
+  ns: DurableObjectNamespace,
+  userHash: string,
+  txId: string,
+) {
+  return callPost<TransactionRow>(ns, userHash, "/turn", { tx_id: txId });
 }
