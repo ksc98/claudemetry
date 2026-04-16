@@ -118,14 +118,14 @@ function buildGroups(
 ): GroupRow[] {
   return summaries.map((s) => {
     const raw = turnsBySession[s.id] ?? [];
-    // Chronological within a group so the "show more" reveal makes sense.
-    const sortedAsc = [...raw].sort((a, b) => a.ts - b.ts);
-    const subRows: LeafRow[] = sortedAsc.map((tx, i) => ({
+    // Newest-first so the most recent activity is visible without scrolling.
+    const sorted = [...raw].sort((a, b) => b.ts - a.ts);
+    const subRows: LeafRow[] = sorted.map((tx, i) => ({
       kind: "leaf",
       id: `l:${tx.tx_id}`,
       tx,
       posInGroup: i,
-      groupSize: sortedAsc.length,
+      groupSize: sorted.length,
     }));
     const models = new Map<string, number>();
     for (const m of s.models) models.set(m.model, m.turns);
@@ -699,6 +699,7 @@ export default function RecentTurnsTable({
     state: { expanded, sorting, globalFilter, columnVisibility },
     getRowId: (r) => r.id,
     getSubRows: (r) => (r.kind === "group" ? (r as GroupRow).subRows : undefined),
+    getRowCanExpand: (row) => row.original.kind === "group",
     onExpandedChange: setExpanded,
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
@@ -900,7 +901,12 @@ export default function RecentTurnsTable({
                     <TableRow
                       key={row.id}
                       className="bg-[var(--color-card-elevated)]/40 cursor-pointer"
-                      onClick={row.getToggleExpandedHandler()}
+                      onClick={() => {
+                        setExpanded((prev) => {
+                          const p = (prev ?? {}) as Record<string, boolean>;
+                          return { ...p, [row.id]: !p[row.id] };
+                        });
+                      }}
                     >
                       <TableCell className="pl-4 pr-1 w-4 align-middle">
                         {row.getIsExpanded() ? (
