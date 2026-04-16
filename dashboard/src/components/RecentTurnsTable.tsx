@@ -319,9 +319,9 @@ const columns: ColumnDef<UIRow>[] = [
     },
   },
   {
-    accessorFn: (r) => (isLeaf(r) ? r.tx.cache_creation : 0),
-    id: "cache_creation",
-    header: "Cache W",
+    accessorFn: (r) => (isLeaf(r) ? (r.tx.cache_creation_5m ?? 0) : 0),
+    id: "cache_5m",
+    header: "CW 5m",
     cell: ({ row }) => {
       if (!isLeaf(row.original)) return null;
       const tx = row.original.tx;
@@ -332,22 +332,32 @@ const columns: ColumnDef<UIRow>[] = [
           </span>
         );
       }
-      const total = tx.cache_creation;
-      const w5m = tx.cache_creation_5m ?? 0;
-      const w1h = tx.cache_creation_1h ?? 0;
-      const split = w5m + w1h > 0;
+      const v = tx.cache_creation_5m ?? 0;
       return (
-        <span
-          className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55"
-          title={
-            split
-              ? `${fmtInt(w5m)} × 5m · ${fmtInt(w1h)} × 1h`
-              : total > 0
-                ? `${fmtInt(total)} cache writes`
-                : undefined
-          }
-        >
-          {fmtInt(total)}
+        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55">
+          {fmtInt(v)}
+        </span>
+      );
+    },
+  },
+  {
+    accessorFn: (r) => (isLeaf(r) ? (r.tx.cache_creation_1h ?? 0) : 0),
+    id: "cache_1h",
+    header: "CW 1h",
+    cell: ({ row }) => {
+      if (!isLeaf(row.original)) return null;
+      const tx = row.original.tx;
+      if (tx.in_flight === 1) {
+        return (
+          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+            —
+          </span>
+        );
+      }
+      const v = tx.cache_creation_1h ?? 0;
+      return (
+        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55">
+          {fmtInt(v)}
         </span>
       );
     },
@@ -431,7 +441,8 @@ const COLUMN_LABELS: Record<string, string> = {
   in: "Input tokens",
   out: "Output tokens",
   cache_read: "Cache read",
-  cache_creation: "Cache write",
+  cache_5m: "Cache write 5m",
+  cache_1h: "Cache write 1h",
   latency: "Latency",
   tools: "Tools",
   cost: "Cost",
@@ -443,7 +454,8 @@ const RIGHT_ALIGNED_COLS = new Set([
   "in",
   "out",
   "cache_read",
-  "cache_creation",
+  "cache_5m",
+  "cache_1h",
   "latency",
   "cost",
 ]);
@@ -919,7 +931,7 @@ export default function RecentTurnsTable({
                                 /* span model through cache_read so the group stays compact */
                                 (() => {
                                   const from = visCols.indexOf("model");
-                                  const spanIds = ["model", "in", "out", "cache_read", "cache_creation"];
+                                  const spanIds = ["model", "in", "out", "cache_read", "cache_5m", "cache_1h"];
                                   let count = 0;
                                   for (let i = from; i < visCols.length; i++) {
                                     if (spanIds.includes(visCols[i])) count++;
@@ -971,7 +983,8 @@ export default function RecentTurnsTable({
                           case "in":
                           case "out":
                           case "cache_read":
-                          case "cache_creation":
+                          case "cache_5m":
+                          case "cache_1h":
                             return null;
                           /* ── cost → session total cost ── */
                           case "cost":

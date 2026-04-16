@@ -239,9 +239,9 @@ const columns: ColumnDef<TurnRow>[] = [
     },
   },
   {
-    accessorFn: (r) => r.tx.cache_creation,
-    id: "cache_creation",
-    header: "Cache W",
+    accessorFn: (r) => r.tx.cache_creation_5m ?? 0,
+    id: "cache_5m",
+    header: "CW 5m",
     cell: ({ row }) => {
       const tx = row.original.tx;
       if (tx.in_flight === 1) {
@@ -251,21 +251,31 @@ const columns: ColumnDef<TurnRow>[] = [
           </span>
         );
       }
-      const w5m = tx.cache_creation_5m ?? 0;
-      const w1h = tx.cache_creation_1h ?? 0;
-      const split = w5m + w1h > 0;
+      const v = tx.cache_creation_5m ?? 0;
       return (
-        <span
-          className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55"
-          title={
-            split
-              ? `${fmtInt(w5m)} × 5m · ${fmtInt(w1h)} × 1h`
-              : tx.cache_creation > 0
-                ? `${fmtInt(tx.cache_creation)} cache writes`
-                : undefined
-          }
-        >
-          {fmtInt(tx.cache_creation)}
+        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55">
+          {fmtInt(v)}
+        </span>
+      );
+    },
+  },
+  {
+    accessorFn: (r) => r.tx.cache_creation_1h ?? 0,
+    id: "cache_1h",
+    header: "CW 1h",
+    cell: ({ row }) => {
+      const tx = row.original.tx;
+      if (tx.in_flight === 1) {
+        return (
+          <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
+            —
+          </span>
+        );
+      }
+      const v = tx.cache_creation_1h ?? 0;
+      return (
+        <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-volume)]/55">
+          {fmtInt(v)}
         </span>
       );
     },
@@ -344,7 +354,8 @@ const COLUMN_LABELS: Record<string, string> = {
   in: "Input tokens",
   out: "Output tokens",
   cache_read: "Cache read",
-  cache_creation: "Cache write",
+  cache_5m: "Cache write 5m",
+  cache_1h: "Cache write 1h",
   latency: "Latency",
   tools: "Tools",
   cost: "Cost",
@@ -354,7 +365,8 @@ const RIGHT_ALIGNED_COLS = new Set([
   "in",
   "out",
   "cache_read",
-  "cache_creation",
+  "cache_5m",
+  "cache_1h",
   "latency",
   "cost",
 ]);
