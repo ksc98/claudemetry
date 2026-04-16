@@ -428,9 +428,6 @@ async fn admin_route(
         return handle_search(&user_hash, &forwarded_body, env).await;
     }
 
-    // Backfill re-embeds every finalized turn in the caller's DO and upserts
-    // it under `namespace=<user_hash>`. Needed one-off when vectors predate
-    // the namespace migration; safe to re-run (upsert is idempotent on id).
     if path == "/_cm/admin/vectorize-backfill" && method == &Method::Post {
         return handle_vectorize_backfill(&user_hash, &forwarded_body, env).await;
     }
@@ -1456,10 +1453,10 @@ impl UserStore {
 
         let sql = self.state.storage().sql();
         let cursor = sql.exec(
-            "SELECT tx_id, session_id, ts, user_text, assistant_text
+            "SELECT tx_id, session_id, ts, user_text, assistant_text, thinking_text
              FROM transactions
              WHERE ts < ?
-               AND (length(COALESCE(user_text, '')) + length(COALESCE(assistant_text, ''))) > 3
+               AND (length(COALESCE(user_text, '')) + length(COALESCE(assistant_text, '')) + length(COALESCE(thinking_text, ''))) > 3
              ORDER BY ts DESC
              LIMIT ?",
             Some(vec![before_ts.into(), batch_size.into()]),
@@ -1471,7 +1468,7 @@ impl UserStore {
         let total_rows: i64 = {
             let c = sql.exec(
                 "SELECT COUNT(*) AS n FROM transactions
-                 WHERE (length(COALESCE(user_text, '')) + length(COALESCE(assistant_text, ''))) > 3",
+                 WHERE (length(COALESCE(user_text, '')) + length(COALESCE(assistant_text, '')) + length(COALESCE(thinking_text, ''))) > 3",
                 None,
             )?;
             let arr: Vec<serde_json::Value> = c.to_array().unwrap_or_default();
@@ -1519,7 +1516,11 @@ impl UserStore {
                 .get("assistant_text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let combined = format!("{}\n---\n{}", ut, at);
+            let tt = row
+                .get("thinking_text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let combined = format!("{}\n---\n{}\n---\n{}", ut, at, tt);
             let text_len = combined.len() as i64;
 
             if combined.trim().len() <= 3 {
@@ -2250,12 +2251,11 @@ fn parse_rate_limits(
 
 // ---------- Workers AI + Vectorize ----------
 
-const EMBED_MODEL: &str = "@cf/baai/bge-base-en-v1.5";
-const EMBED_DIMS: usize = 768;
-// bge-base-en-v1.5 context is ~512 tokens (~2000 chars rule of thumb).
-// We truncate from the front so the tail — usually the most recent
-// prompt + the assistant's summary — stays in the embedding.
-const EMBED_INPUT_CAP: usize = 2000;
+const EMBED_MODEL: &str = "@cf/qwen/qwen3-embedding-0.6b";
+const EMBED_DIMS: usize = 1024;
+// qwen3-embedding-0.6b context is 8192 tokens on CF (~32K chars).
+// Truncate from the front so the tail stays in the embedding.
+const EMBED_INPUT_CAP: usize = 30_000;
 
 /// Thin `JsValue` wrapper that goes through `env.get_binding` without
 /// requiring a specific JS constructor name. Worker 0.8 ships with an `Ai`
@@ -2350,12 +2350,12 @@ async fn embed_text(env: &Env, text: &str) -> Option<Vec<f32>> {
     // serialized as a JS Map by serde-wasm-bindgen (worker-rs wraps that
     // under the hood), which the AiError: 5006 validator silently rejects.
     // A #[derive(Serialize)] struct serializes as a plain object, which
-    // matches the model's {text: string} schema.
+    // matches the model's schema.
     #[derive(Serialize)]
     struct EmbedInput<'a> {
-        text: &'a str,
+        text: Vec<&'a str>,
     }
-    let input = EmbedInput { text: trimmed };
+    let input = EmbedInput { text: vec![trimmed] };
     let out: serde_json::Value = match ai.run(EMBED_MODEL, input).await {
         Ok(v) => v,
         Err(e) => {
