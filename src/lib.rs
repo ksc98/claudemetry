@@ -386,6 +386,17 @@ async fn admin_route(
                     if !is_hex16(h) {
                         return Response::error("hash must be 16 hex chars", 400);
                     }
+                    // Cross-DO queries are gated by the ADMIN_EMAILS secret.
+                    // Caller's own hash is always allowed (no privilege gain).
+                    // Anything else requires the caller's email to be in the
+                    // allowlist. Without ADMIN_EMAILS set, cross-DO reads are
+                    // forbidden outright — safe default.
+                    if h != user_hash && !is_admin_email(email.as_deref(), env) {
+                        return Response::error(
+                            "cross-DO admin/sql requires your email in ADMIN_EMAILS",
+                            403,
+                        );
+                    }
                     target_hash = h.to_string();
                 }
                 // Re-serialize without the `hash` field so the DO sees a
@@ -2281,6 +2292,26 @@ async fn compute_user_hash(
         return Some((hash_identity(salt, "apikey:", &api_key), None, None));
     }
     None
+}
+
+// Comma-separated email allowlist for privileged operations — currently
+// just the cross-DO `hash` override on /_cm/admin/sql. Read fresh from the
+// secret each check so a rotation lands without a redeploy. Unset or empty
+// means "no one" (safe default — no request grants cross-DO access).
+fn is_admin_email(email: Option<&str>, env: &Env) -> bool {
+    let Some(email) = email else {
+        return false;
+    };
+    let caller = email.trim().to_ascii_lowercase();
+    if caller.is_empty() {
+        return false;
+    }
+    let Ok(raw) = env.secret("ADMIN_EMAILS").map(|s| s.to_string()) else {
+        return false;
+    };
+    raw.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .any(|allowed| allowed == caller)
 }
 
 fn hash_identity(salt: &str, prefix: &str, id: &str) -> String {
