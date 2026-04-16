@@ -12,12 +12,14 @@ import RowsPoller from "@/components/RowsPoller";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
 import {
-  getRecent,
+  getSessionTurns,
   getSessionEnds,
+  getSessionsSummary,
   type TransactionRow,
   type SessionEnds,
+  type SessionModelBucket,
 } from "@/lib/store";
-import { buildSessionList } from "@/lib/sessions";
+import { buildSessionListFromSummary } from "@/lib/sessions";
 import {
   estimateCostUsd,
   fmtInt,
@@ -46,21 +48,23 @@ if (!userHash) return Astro.redirect("/");
 
 const ns = env.USER_STORE;
 
-let allRows: TransactionRow[] = [];
+let sessionRowsDesc: TransactionRow[] = [];
 let sessionEnds: SessionEnds = {};
+let sessionBuckets: SessionModelBucket[] = [];
 let loadErr: string | null = null;
 try {
-  [allRows, sessionEnds] = await Promise.all([
-    getRecent(ns, userHash),
+  [sessionRowsDesc, sessionEnds, sessionBuckets] = await Promise.all([
+    getSessionTurns(ns, userHash, sessionId),
     getSessionEnds(ns, userHash),
+    getSessionsSummary(ns, userHash),
   ]);
 } catch (e) {
   loadErr = e instanceof Error ? e.message : String(e);
 }
 
-const rows = allRows
-  .filter((r) => r.session_id === sessionId)
-  .sort((a, b) => a.ts - b.ts);
+// Session-scoped rows come desc from the DO; the rest of the page expects
+// chronological order for timeline + sparklines.
+const rows = [...sessionRowsDesc].sort((a, b) => a.ts - b.ts);
 
 if (!loadErr && rows.length === 0) {
   // Session not found for this user. Surface a soft 404 instead of redirect
@@ -96,8 +100,10 @@ const active =
   now - lastTs < ACTIVE_WINDOW_MS &&
   (endedAt == null || endedAt < lastTs);
 
-// Rate-limit snapshot is account-global, sourced from the freshest row we have.
-const rlRow = allRows.find(
+// Rate-limit snapshot is account-global. We search this session's own
+// rows (freshest first) — usually fine since every live session has at
+// least one recent turn carrying the header.
+const rlRow = [...sessionRowsDesc].find(
   (r) => r.rl_tok_remaining != null && r.rl_tok_limit != null && r.rl_tok_limit > 0,
 );
 const rateLimit =
@@ -105,7 +111,7 @@ const rateLimit =
     ? { tokRemaining: rlRow.rl_tok_remaining, tokLimit: rlRow.rl_tok_limit }
     : null;
 
-const sessionList = buildSessionList(allRows, sessionEnds);
+const sessionList = buildSessionListFromSummary(sessionBuckets, sessionEnds);
 
 function shortSession(id: string): string {
   return id.slice(0, 8);
@@ -171,7 +177,11 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
   sessions={sessionList}
   currentSessionId={sessionId}
 >
-  <RowsPoller client:load intervalMs={1000} />
+  <RowsPoller
+    client:load
+    intervalMs={1000}
+    endpoint={`/api/session/turns?id=${encodeURIComponent(sessionId)}`}
+  />
 
   <div class="mb-6 flex items-baseline justify-between gap-4 flex-wrap">
     <div>

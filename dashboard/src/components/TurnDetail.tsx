@@ -1,16 +1,73 @@
 import * as React from "react";
-import { Sparkles } from "lucide-react";
+import { Loader2, Sparkles } from "lucide-react";
 import type { TransactionRow } from "@/lib/store";
 import { fmtBytes, fmtInt, fmtTs } from "@/lib/format";
 import { shortToolName } from "@/lib/tools";
 import { stopDotClass } from "@/lib/stop";
 import { cn } from "@/lib/cn";
 
-export function TurnDetail({ tx }: { tx: TransactionRow }) {
+// List endpoints drop user_text / assistant_text / tools_json to keep the
+// recent-turns + session-turns payloads small. The detail view fetches them
+// on-demand from /api/turn the first time the user expands a row, and caches
+// the hydrated row for the session so re-expanding is free.
+const turnDetailCache = new Map<string, TransactionRow>();
+
+function hasDetail(tx: TransactionRow): boolean {
+  return tx.user_text != null || tx.assistant_text != null || tx.tools_json != null;
+}
+
+export function TurnDetail({ tx: initial }: { tx: TransactionRow }) {
+  const [tx, setTx] = React.useState<TransactionRow>(
+    () => turnDetailCache.get(initial.tx_id) ?? initial,
+  );
+  const [loading, setLoading] = React.useState(
+    () =>
+      !hasDetail(tx) &&
+      !turnDetailCache.has(initial.tx_id) &&
+      initial.in_flight !== 1,
+  );
+
+  React.useEffect(() => {
+    // Already have text columns (session page hands us full rows) → nothing to do.
+    if (hasDetail(tx)) return;
+    // In-flight placeholder has no text yet; the row will refresh itself
+    // via the rowsBus once finalized. Don't bother fetching.
+    if (initial.in_flight === 1) return;
+    // Cached from a previous expand in this session.
+    const cached = turnDetailCache.get(initial.tx_id);
+    if (cached) {
+      setTx(cached);
+      setLoading(false);
+      return;
+    }
+    const ctrl = new AbortController();
+    setLoading(true);
+    fetch(`/api/turn?id=${encodeURIComponent(initial.tx_id)}`, {
+      signal: ctrl.signal,
+      cache: "no-store",
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((full: TransactionRow) => {
+        turnDetailCache.set(initial.tx_id, full);
+        setTx(full);
+      })
+      .catch(() => {
+        /* leave placeholder; user can re-expand to retry */
+      })
+      .finally(() => setLoading(false));
+    return () => ctrl.abort();
+  }, [initial.tx_id, initial.in_flight, tx]);
+
   const tools: string[] = tx.tools_json ? JSON.parse(tx.tools_json) : [];
   const hasConversation = !!(tx.user_text || tx.assistant_text);
   return (
     <div className="flex flex-col gap-4">
+      {loading && (
+        <p className="flex items-center gap-2 text-xs text-[var(--color-subtle-foreground)]">
+          <Loader2 size={12} className="animate-spin" />
+          Loading conversation…
+        </p>
+      )}
       {hasConversation && (
         <div className="flex flex-col gap-3">
           {tx.user_text ? (

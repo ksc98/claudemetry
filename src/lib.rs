@@ -33,7 +33,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     // token / api key; we only ever query their own user_hash's DO.
     if path.starts_with("/_cm/") {
         let body = req.bytes().await.unwrap_or_default();
-        return admin_route(&path, &method, &body, &req_headers_vec, &salt, &env).await;
+        return admin_route(&path, &query, &method, &body, &req_headers_vec, &salt, &env).await;
     }
 
     let req_body_bytes = req.bytes().await.unwrap_or_default();
@@ -315,6 +315,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
 
 async fn admin_route(
     path: &str,
+    query: &str,
     method: &Method,
     body: &[u8],
     headers: &[(String, String)],
@@ -435,6 +436,8 @@ async fn admin_route(
         (&Method::Get, "/_cm/recent") => (Method::Get, "/recent"),
         (&Method::Get, "/_cm/stats") => (Method::Get, "/stats"),
         (&Method::Get, "/_cm/sessions/ends") => (Method::Get, "/session/ends"),
+        (&Method::Get, "/_cm/sessions/summary") => (Method::Get, "/sessions/summary"),
+        (&Method::Get, "/_cm/session/turns") => (Method::Get, "/session/turns"),
         (&Method::Post, "/_cm/session/end") => (Method::Post, "/session/end"),
         (&Method::Post, "/_cm/turn") => (Method::Post, "/turn"),
         (&Method::Post, "/_cm/admin/sql") => {
@@ -474,7 +477,8 @@ async fn admin_route(
     let id = ns.id_from_name(&target_hash)?;
     let stub = id.get_stub()?;
 
-    let inner_url = format!("https://store{}", inner_path);
+    // Preserve query string so the DO handler can read ?since= / ?id= / ?limit=.
+    let inner_url = format!("https://store{}{}", inner_path, query);
     let mut init = RequestInit::new();
     init.with_method(inner_method);
     if !forwarded_body.is_empty() {
@@ -490,6 +494,18 @@ async fn admin_route(
 
 fn is_hex16(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+// Small helpers for DO handlers that read query params off the stub URL.
+fn query_string(req: &Request, key: &str) -> Option<String> {
+    let url = req.url().ok()?;
+    url.query_pairs()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.into_owned())
+}
+
+fn query_i64(req: &Request, key: &str) -> Option<i64> {
+    query_string(req, key).and_then(|v| v.parse::<i64>().ok())
 }
 
 // Serialize a TransactionRecord and POST it to a DO endpoint. Used by
@@ -549,8 +565,10 @@ impl DurableObject for UserStore {
             (Method::Post, "/ingest/finalize") => self.ingest_finalize(&mut req).await,
             (Method::Post, "/session/end") => self.end_session(&mut req).await,
             (Method::Get, "/session/ends") => self.session_ends().await,
-            (Method::Get, "/recent") => self.recent().await,
-            (Method::Get, "/stats") => self.stats().await,
+            (Method::Get, "/recent") => self.recent(&req).await,
+            (Method::Get, "/stats") => self.stats(&req).await,
+            (Method::Get, "/sessions/summary") => self.sessions_summary().await,
+            (Method::Get, "/session/turns") => self.session_turns(&req).await,
             (Method::Post, "/sql") => self.sql_exec(&mut req).await,
             (Method::Post, "/search/fts") => self.search_fts(&mut req).await,
             (Method::Post, "/search/hydrate") => self.search_hydrate(&mut req).await,
@@ -680,6 +698,55 @@ impl UserStore {
             "CREATE INDEX IF NOT EXISTS idx_in_flight ON transactions(ts) WHERE in_flight = 1",
             None,
         );
+
+        // Maintained aggregate — one row per (session_id, model). The DO
+        // recomputes the affected session's rows in `write_row` on every
+        // insert/update, so this stays O(sessions) to read even as the
+        // transactions table grows without bound. Polled every 5 s by the
+        // sidebar, so this is the single biggest read-side win.
+        let summary_is_new = matches!(
+            sql.exec(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='session_summaries'",
+                None,
+            )
+            .and_then(|c| c.to_array::<serde_json::Value>()),
+            Ok(v) if v.is_empty(),
+        );
+        let _ = sql.exec(
+            "CREATE TABLE IF NOT EXISTS session_summaries (
+                session_id TEXT NOT NULL,
+                model TEXT,
+                turns INTEGER NOT NULL,
+                first_ts INTEGER NOT NULL,
+                last_ts INTEGER NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read INTEGER NOT NULL DEFAULT 0,
+                cache_creation INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, model)
+            )",
+            None,
+        );
+        // First-time backfill: if the table is brand new, seed it from the
+        // existing transactions. O(turns) one-off; all subsequent writes
+        // maintain it incrementally.
+        if summary_is_new {
+            let _ = sql.exec(
+                "INSERT INTO session_summaries
+                   (session_id, model, turns, first_ts, last_ts,
+                    input_tokens, output_tokens, cache_read, cache_creation)
+                 SELECT session_id, model,
+                        COUNT(*), MIN(ts), MAX(ts),
+                        COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(cache_read), 0),
+                        COALESCE(SUM(cache_creation), 0)
+                 FROM transactions
+                 WHERE session_id IS NOT NULL
+                 GROUP BY session_id, model",
+                None,
+            );
+        }
         // Stale sweep: if a worker was evicted between /ingest/start and
         // /ingest/finalize, the placeholder row would stay in_flight=1
         // forever. On each fresh DO instance we flip anything older than
@@ -820,11 +887,50 @@ impl UserStore {
                 r.assistant_text.clone().into(),
             ]),
         )?;
+
+        // Maintain the per-session aggregate. Scoped to this session only
+        // (not a global re-scan), so cost is O(turns-in-this-session) —
+        // typically tens of rows, sub-millisecond. Skipped for unlinked
+        // rows; those are invisible to the session view anyway.
+        if let Some(sid) = r.session_id.as_ref() {
+            self.refresh_session_summary(sid)?;
+        }
         Ok(())
     }
 
-    async fn recent(&self) -> Result<Response> {
+    // DELETE + re-aggregate for one session. Cheap (bounded by
+    // turns-in-session via idx_session) and keeps the materialized table
+    // exactly in sync with the raw transactions table — no delta math,
+    // no drift on retries.
+    fn refresh_session_summary(&self, session_id: &str) -> Result<()> {
         let sql = self.state.storage().sql();
+        sql.exec(
+            "DELETE FROM session_summaries WHERE session_id = ?",
+            Some(vec![session_id.into()]),
+        )?;
+        sql.exec(
+            "INSERT INTO session_summaries
+               (session_id, model, turns, first_ts, last_ts,
+                input_tokens, output_tokens, cache_read, cache_creation)
+             SELECT session_id, model,
+                    COUNT(*), MIN(ts), MAX(ts),
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cache_read), 0),
+                    COALESCE(SUM(cache_creation), 0)
+             FROM transactions
+             WHERE session_id = ?
+             GROUP BY session_id, model",
+            Some(vec![session_id.into()]),
+        )?;
+        Ok(())
+    }
+
+    async fn recent(&self, req: &Request) -> Result<Response> {
+        let since = query_i64(req, "since").unwrap_or(0);
+        let sql = self.state.storage().sql();
+        // List-view columns only: excludes user_text / assistant_text / tools_json
+        // — those are fetched on demand via /turn for the detail view.
         let cursor = sql.exec(
             "SELECT tx_id, ts, session_id, method, url, model, status, elapsed_ms,
                     input_tokens, output_tokens, cache_read, cache_creation,
@@ -833,16 +939,16 @@ impl UserStore {
                     thinking_budget, thinking_blocks, max_tokens,
                     rl_req_remaining, rl_req_limit,
                     rl_tok_remaining, rl_tok_limit,
-                    in_flight, anthropic_message_id,
-                    user_text, assistant_text
-             FROM transactions ORDER BY ts DESC",
-            None,
+                    in_flight, anthropic_message_id
+             FROM transactions WHERE ts >= ? ORDER BY ts DESC",
+            Some(vec![since.into()]),
         )?;
         let rows: Vec<serde_json::Value> = cursor.to_array()?;
         Response::from_json(&rows)
     }
 
-    async fn stats(&self) -> Result<Response> {
+    async fn stats(&self, req: &Request) -> Result<Response> {
+        let since = query_i64(req, "since").unwrap_or(0);
         let sql = self.state.storage().sql();
         let cursor = sql.exec(
             "SELECT
@@ -855,8 +961,8 @@ impl UserStore {
                 COALESCE(SUM(resp_body_bytes), 0) AS resp_bytes,
                 MIN(ts) AS first_ts,
                 MAX(ts) AS last_ts
-             FROM transactions",
-            None,
+             FROM transactions WHERE ts >= ?",
+            Some(vec![since.into()]),
         )?;
         let rows: Vec<serde_json::Value> = cursor.to_array()?;
         let mut summary = rows.into_iter().next().unwrap_or(json!({}));
@@ -864,6 +970,52 @@ impl UserStore {
             obj.insert("storage_bytes".into(), json!(sql.database_size() as i64));
         }
         Response::from_json(&summary)
+    }
+
+    // Per-session aggregate, one row per (session_id, model). Read is a
+    // plain scan of the maintained `session_summaries` table — O(sessions),
+    // independent of turn count. Write path refreshes this table for the
+    // affected session on every transaction insert/update.
+    async fn sessions_summary(&self) -> Result<Response> {
+        let sql = self.state.storage().sql();
+        let cursor = sql.exec(
+            "SELECT session_id, model, turns, first_ts, last_ts,
+                    input_tokens, output_tokens, cache_read, cache_creation
+             FROM session_summaries
+             ORDER BY session_id, turns DESC",
+            None,
+        )?;
+        let rows: Vec<serde_json::Value> = cursor.to_array()?;
+        Response::from_json(&rows)
+    }
+
+    // Turns for a single session, same trimmed column set as /recent.
+    // Fetched eagerly for active sessions and on-demand when the user
+    // expands a collapsed session in the recent-turns table.
+    async fn session_turns(&self, req: &Request) -> Result<Response> {
+        let Some(id) = query_string(req, "id") else {
+            return Response::error("missing id", 400);
+        };
+        if id.is_empty() {
+            return Response::error("missing id", 400);
+        }
+        let limit = query_i64(req, "limit").unwrap_or(1000).clamp(1, 5000);
+        let sql = self.state.storage().sql();
+        let cursor = sql.exec(
+            "SELECT tx_id, ts, session_id, method, url, model, status, elapsed_ms,
+                    input_tokens, output_tokens, cache_read, cache_creation,
+                    stop_reason, req_body_bytes, resp_body_bytes,
+                    cache_creation_5m, cache_creation_1h,
+                    thinking_budget, thinking_blocks, max_tokens,
+                    rl_req_remaining, rl_req_limit,
+                    rl_tok_remaining, rl_tok_limit,
+                    in_flight, anthropic_message_id
+             FROM transactions
+             WHERE session_id = ? ORDER BY ts DESC LIMIT ?",
+            Some(vec![id.into(), limit.into()]),
+        )?;
+        let rows: Vec<serde_json::Value> = cursor.to_array()?;
+        Response::from_json(&rows)
     }
 
     // Fetch a single turn's complete record — all columns including full
