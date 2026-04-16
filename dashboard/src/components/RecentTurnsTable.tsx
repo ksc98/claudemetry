@@ -658,7 +658,7 @@ export default function RecentTurnsTable({
     getExpandedRowModel: getExpandedRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
-    filterFromLeafRows: true,
+    filterFromLeafRows: false,
     globalFilterFn: (row, _id, value) => {
       const q = String(value).toLowerCase().trim();
       if (!q) return true;
@@ -675,13 +675,9 @@ export default function RecentTurnsTable({
           .toLowerCase();
         return hay.includes(q);
       }
-      const hay = [
-        o.sessionId ?? "",
-        shortSession(o.sessionId),
-      ]
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
+      // Group rows always pass — turns may not be loaded yet for
+      // collapsed sessions. Leaf-level filtering applies once expanded.
+      return true;
     },
   });
 
