@@ -593,6 +593,7 @@ impl DurableObject for UserStore {
             (Method::Get, "/stats") => self.stats(&req).await,
             (Method::Get, "/sessions/summary") => self.sessions_summary().await,
             (Method::Get, "/session/turns") => self.session_turns(&req).await,
+            (Method::Get, "/in_flight") => self.in_flight_turns(&req).await,
             (Method::Post, "/sql") => self.sql_exec(&mut req).await,
             (Method::Post, "/search/fts") => self.search_fts(&mut req).await,
             (Method::Post, "/search/hydrate") => self.search_hydrate(&mut req).await,
@@ -751,6 +752,29 @@ impl UserStore {
             None,
         );
 
+        // In-flight turns are tracked here so a page refresh during an
+        // active turn can re-render the spinner. Rows are inserted on
+        // /ws/turn-start and deleted on /ingest. The stale-sweep below
+        // purges anything older than 10 min in case the proxy crashed
+        // between turn-start and ingest.
+        let _ = sql.exec(
+            "CREATE TABLE IF NOT EXISTS in_flight_turns (
+                tx_id TEXT PRIMARY KEY,
+                session_id TEXT,
+                ts INTEGER NOT NULL,
+                model TEXT,
+                tool_choice TEXT,
+                thinking_budget INTEGER,
+                max_tokens INTEGER
+            )",
+            None,
+        );
+        let stale_cutoff = (Date::now().as_millis() as i64) - 10 * 60_000;
+        let _ = sql.exec(
+            "DELETE FROM in_flight_turns WHERE ts < ?",
+            Some(vec![stale_cutoff.into()]),
+        );
+
         // Maintained aggregate — one row per (session_id, model). The DO
         // recomputes the affected session's rows in `write_row` on every
         // insert/update, so this stays O(sessions) to read even as the
@@ -849,11 +873,59 @@ impl UserStore {
 
     async fn broadcast_turn_start(&self, req: &mut Request) -> Result<Response> {
         let payload: serde_json::Value = req.json().await?;
+
+        // Persist so a fresh page load (refresh during an active turn) can
+        // hydrate the spinner instead of waiting for the next WS event.
+        let tx_id = payload.get("tx_id").and_then(|v| v.as_str()).unwrap_or("");
+        if !tx_id.is_empty() {
+            let session_id = payload.get("session_id").and_then(|v| v.as_str()).map(String::from);
+            let ts = payload.get("ts").and_then(|v| v.as_i64()).unwrap_or_else(|| Date::now().as_millis() as i64);
+            let model = payload.get("model").and_then(|v| v.as_str()).map(String::from);
+            let tool_choice = payload.get("tool_choice").and_then(|v| v.as_str()).map(String::from);
+            let thinking_budget = payload.get("thinking_budget").and_then(|v| v.as_i64());
+            let max_tokens = payload.get("max_tokens").and_then(|v| v.as_i64());
+            let _ = self.state.storage().sql().exec(
+                "INSERT OR REPLACE INTO in_flight_turns
+                 (tx_id, session_id, ts, model, tool_choice, thinking_budget, max_tokens)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                Some(vec![
+                    tx_id.to_string().into(),
+                    session_id.into(),
+                    ts.into(),
+                    model.into(),
+                    tool_choice.into(),
+                    thinking_budget.into(),
+                    max_tokens.into(),
+                ]),
+            );
+        }
+
         self.broadcast(&json!({
             "type": "turn_start",
             "data": payload,
         }));
         Response::ok("ok")
+    }
+
+    async fn in_flight_turns(&self, req: &Request) -> Result<Response> {
+        let url = req.url()?;
+        let session_id = url.query_pairs().find(|(k, _)| k == "session_id").map(|(_, v)| v.into_owned());
+        let sql = self.state.storage().sql();
+        let cursor = if let Some(sid) = session_id {
+            sql.exec(
+                "SELECT tx_id, session_id, ts, model, tool_choice, thinking_budget, max_tokens
+                 FROM in_flight_turns WHERE session_id = ? ORDER BY ts DESC",
+                Some(vec![sid.into()]),
+            )?
+        } else {
+            sql.exec(
+                "SELECT tx_id, session_id, ts, model, tool_choice, thinking_budget, max_tokens
+                 FROM in_flight_turns ORDER BY ts DESC",
+                None,
+            )?
+        };
+        let rows: Vec<serde_json::Value> = cursor.to_array()?;
+        Response::from_json(&rows)
     }
 
     // ---------- Sessions ----------
@@ -885,6 +957,13 @@ impl UserStore {
     async fn ingest(&self, req: &mut Request) -> Result<Response> {
         let r: TransactionRecord = req.json().await?;
         self.insert_or_replace(&r)?;
+
+        // Clear the in-flight placeholder so a refresh after completion
+        // doesn't show a stale spinner.
+        let _ = self.state.storage().sql().exec(
+            "DELETE FROM in_flight_turns WHERE tx_id = ?",
+            Some(vec![r.tx_id.clone().into()]),
+        );
 
         // Broadcast turn_complete to connected WS clients (list-view fields
         // only — user_text/assistant_text are large and not needed).

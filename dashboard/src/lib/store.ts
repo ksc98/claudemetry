@@ -163,3 +163,23 @@ export function getTurn(
 ) {
   return callPost<TransactionRow>(ns, userHash, "/turn", { tx_id: txId });
 }
+
+export interface InFlightTurn {
+  tx_id: string;
+  session_id: string | null;
+  ts: number;
+  model: string | null;
+  tool_choice: string | null;
+  thinking_budget: number | null;
+  max_tokens: number | null;
+}
+
+export function getInFlight(
+  ns: DurableObjectNamespace,
+  userHash: string,
+  sessionId?: string,
+) {
+  return callGet<InFlightTurn[]>(ns, userHash, "/in_flight", {
+    session_id: sessionId,
+  });
+}
