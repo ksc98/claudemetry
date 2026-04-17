@@ -1,15 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Area,
   Brush,
   CartesianGrid,
   ComposedChart,
   Line,
-  Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import ChartTooltipCard from "./ChartTooltipCard";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from "@/components/ui/chart";
 
 export type TokenAreaPoint = {
   // Token series use `number | null`; null renders as a gap in the area
@@ -90,13 +94,11 @@ function hybridLogLinearTicks(
     return { ticks: [1, 10], ceiling: 10 };
   }
   const ticks: number[] = [];
-  // Decades up to (but not past) the threshold.
   for (let v = 1; v < linearThreshold; v *= 10) ticks.push(v);
   ticks.push(linearThreshold);
   if (max <= linearThreshold) {
     return { ticks, ceiling: linearThreshold };
   }
-  // Linear increments above the threshold up to the smallest multiple ≥ max.
   const ceiling = Math.ceil(max / linearStep) * linearStep;
   for (let v = linearThreshold + linearStep; v <= ceiling; v += linearStep) {
     ticks.push(v);
@@ -105,8 +107,6 @@ function hybridLogLinearTicks(
 }
 
 // Linear ticks at a fixed step up to the smallest multiple ≥ max.
-// Used on the overview chart so token magnitudes read as plain 10k/20k/…
-// rather than the log decades, even though cache_read dominates visually.
 function linearTicksAtStep(max: number, step: number): number[] {
   if (!Number.isFinite(max) || max <= 0) return [0, step];
   const ceiling = Math.ceil(max / step) * step;
@@ -122,6 +122,31 @@ const TOKEN_KEYS: readonly (keyof TokenAreaPoint)[] = [
   "input",
 ];
 
+// Each series's label + color. CSS vars are resolved inside ChartContainer so
+// the tooltip swatches and axis strokes all share one source of truth.
+const chartConfig = {
+  cache_read: {
+    label: "cache read",
+    color: "var(--color-chart-1)",
+  },
+  cache_creation: {
+    label: "cache create",
+    color: "var(--color-chart-2)",
+  },
+  output: {
+    label: "output",
+    color: "var(--color-chart-4)",
+  },
+  input: {
+    label: "input",
+    color: "var(--color-chart-5)",
+  },
+  cost: {
+    label: "cost",
+    color: "var(--color-money)",
+  },
+} satisfies ChartConfig;
+
 export default function TokenAreaChart({
   data,
   xKey,
@@ -135,51 +160,18 @@ export default function TokenAreaChart({
   showCostDots = false,
   height = 280,
 }: Props) {
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [width, setWidth] = useState<number>(0);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? 0;
-      if (w > 0) setWidth(Math.floor(w));
-    });
-    ro.observe(el);
-    const initial = el.getBoundingClientRect().width;
-    if (initial > 0) setWidth(Math.floor(initial));
-    // Trigger mount fade-in after first measurable paint.
     requestAnimationFrame(() => setMounted(true));
-    return () => ro.disconnect();
   }, []);
 
   const gradients = useMemo(
     () => [
-      {
-        id: `${instanceId}-cacheRead`,
-        color: "var(--color-chart-1)",
-        top: 0.35,
-        bottom: 0.05,
-      },
-      {
-        id: `${instanceId}-cacheCreation`,
-        color: "var(--color-chart-2)",
-        top: 0.35,
-        bottom: 0.05,
-      },
-      {
-        id: `${instanceId}-output`,
-        color: "var(--color-chart-4)",
-        top: 0.45,
-        bottom: 0.08,
-      },
-      {
-        id: `${instanceId}-input`,
-        color: "var(--color-chart-5)",
-        top: 0.5,
-        bottom: 0.1,
-      },
+      { id: `${instanceId}-cacheRead`, color: "var(--color-chart-1)", top: 0.35, bottom: 0.05 },
+      { id: `${instanceId}-cacheCreation`, color: "var(--color-chart-2)", top: 0.35, bottom: 0.05 },
+      { id: `${instanceId}-output`, color: "var(--color-chart-4)", top: 0.45, bottom: 0.08 },
+      { id: `${instanceId}-input`, color: "var(--color-chart-5)", top: 0.5, bottom: 0.1 },
     ],
     [instanceId],
   );
@@ -221,34 +213,30 @@ export default function TokenAreaChart({
     return { yDomain: undefined, yTicks: undefined };
   }, [data, yScale, linearTickStep, linearThreshold]);
 
+  const wrapperHeight = height + (showBrush ? 36 : 0);
+
   return (
     <div
-      ref={wrapRef}
       style={{
         width: "100%",
-        height: height + (showBrush ? 36 : 0),
+        height: wrapperHeight,
         opacity: mounted ? 1 : 0,
         transform: mounted ? "translateY(0)" : "translateY(4px)",
         transition: "opacity 280ms ease, transform 280ms ease",
       }}
     >
-      {width > 0 && (
+      <ChartContainer
+        id={instanceId}
+        config={chartConfig}
+        className="!aspect-auto h-full w-full"
+      >
         <ComposedChart
-          width={width}
-          height={height + (showBrush ? 36 : 0)}
           data={data}
           margin={{ top: 12, right: 48, bottom: showBrush ? 8 : 4, left: 4 }}
         >
           <defs>
             {gradients.map((g) => (
-              <linearGradient
-                key={g.id}
-                id={g.id}
-                x1="0"
-                y1="0"
-                x2="0"
-                y2="1"
-              >
+              <linearGradient key={g.id} id={g.id} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={g.color} stopOpacity={g.top} />
                 <stop offset="95%" stopColor={g.color} stopOpacity={g.bottom} />
               </linearGradient>
@@ -289,18 +277,61 @@ export default function TokenAreaChart({
             tick={{ fill: "var(--color-money)", fontSize: 11 }}
             width={44}
           />
-          <Tooltip
+          <ChartTooltip
             cursor={{
               stroke: "var(--color-border-strong)",
               strokeDasharray: "2 4",
               strokeWidth: 1,
             }}
-            content={(props) => (
-              <ChartTooltipCard
-                {...(props as unknown as Parameters<typeof ChartTooltipCard>[0])}
-                labelFormatter={xLabelFormatter}
+            content={
+              <ChartTooltipContent
+                indicator="dot"
+                // Shadcn's ChartTooltipContent resolves `label` through
+                // ChartConfig, which works for categorical x-axes but not
+                // our numeric ts/turn. Read the raw x value off the first
+                // payload entry's source row so the header stays correct.
+                labelFormatter={(_label, payload) => {
+                  const raw = payload?.[0]?.payload as
+                    | Record<string, unknown>
+                    | undefined;
+                  const x = raw?.[xKey];
+                  if (typeof x !== "number") return "";
+                  return xLabelFormatter
+                    ? xLabelFormatter(x)
+                    : xTickFormatter(x);
+                }}
+                // Token series = fmtTokens; cost = fmtUsd + money color.
+                formatter={(value, name) => {
+                  const n = Number(value);
+                  const isCost = name === "cost";
+                  return (
+                    <>
+                      <span
+                        aria-hidden
+                        className="inline-block h-2 w-2 shrink-0 rounded-[2px]"
+                        style={{
+                          background: `var(--color-${String(name)})`,
+                        }}
+                      />
+                      <div className="flex flex-1 items-center justify-between gap-3 leading-none">
+                        <span className="text-muted-foreground">
+                          {chartConfig[name as keyof typeof chartConfig]?.label ?? name}
+                        </span>
+                        <span
+                          className={
+                            isCost
+                              ? "font-mono text-[var(--color-money)] font-medium tabular-nums"
+                              : "font-mono text-foreground tabular-nums"
+                          }
+                        >
+                          {isCost ? fmtUsd(n) : fmtTokens(n)}
+                        </span>
+                      </div>
+                    </>
+                  );
+                }}
               />
-            )}
+            }
           />
           {/* Render order: largest series first so smaller ones stay visible on top.
               Areas are independent (not stacked): stacking is meaningless on log
@@ -366,7 +397,7 @@ export default function TokenAreaChart({
             />
           )}
         </ComposedChart>
-      )}
+      </ChartContainer>
     </div>
   );
 }
