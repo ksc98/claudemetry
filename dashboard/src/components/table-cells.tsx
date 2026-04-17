@@ -13,6 +13,12 @@ import { shortToolName } from "@/lib/tools";
 import { stopDotClass } from "@/lib/stop";
 import { cn } from "@/lib/cn";
 
+// Every cell here reads from a single `tx` prop that stays reference-stable
+// across turnsBySession updates for rows that didn't change. Wrapping each
+// cell in React.memo means a new turn_start/turn_complete only re-renders
+// the cells whose row actually changed, not every cell in every group.
+// Default shallow compare on `{ tx }` is exactly what we want.
+
 export function shortModel(m: string | null | undefined): string {
   if (!m) return "—";
   return m.replace(/-\d{8}$/, "").replace(/^claude-/, "");
@@ -43,7 +49,9 @@ export const COLUMN_LABELS: Readonly<Record<string, string>> = {
   cost: "Cost",
 };
 
-export function StopDot({ tx }: { tx: TransactionRow }) {
+type TxProps = { tx: TransactionRow };
+
+export const StopDot = React.memo(function StopDot({ tx }: TxProps) {
   if (tx.in_flight === 1) {
     return (
       <Loader2
@@ -62,9 +70,9 @@ export function StopDot({ tx }: { tx: TransactionRow }) {
       style={{ marginRight: 0 }}
     />
   );
-}
+});
 
-export function WhenCell({ tx }: { tx: TransactionRow }) {
+export const WhenCell = React.memo(function WhenCell({ tx }: TxProps) {
   const finishedAt = tx.in_flight === 1 ? tx.ts : tx.ts + tx.elapsed_ms;
   // Render the empty span on SSR + first hydration paint, then fill in
   // once the client has fully mounted. Base.astro's global 1s ticker
@@ -80,17 +88,17 @@ export function WhenCell({ tx }: { tx: TransactionRow }) {
       {hydrated ? fmtAgo(finishedAt) : ""}
     </span>
   );
-}
+});
 
-export function DurationCell({ tx }: { tx: TransactionRow }) {
+export const DurationCell = React.memo(function DurationCell({ tx }: TxProps) {
   return (
     <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
       {tx.in_flight === 1 ? "—" : fmtDuration(tx.elapsed_ms)}
     </span>
   );
-}
+});
 
-export function ModelCell({ tx }: { tx: TransactionRow }) {
+export const ModelCell = React.memo(function ModelCell({ tx }: TxProps) {
   const inflight = tx.in_flight === 1;
   const m = tx.model;
   const thought = (tx.thinking_blocks ?? 0) > 0;
@@ -131,9 +139,9 @@ export function ModelCell({ tx }: { tx: TransactionRow }) {
       )}
     </span>
   );
-}
+});
 
-export function InTokensCell({ tx }: { tx: TransactionRow }) {
+export const InTokensCell = React.memo(function InTokensCell({ tx }: TxProps) {
   return (
     <span
       className={cn(
@@ -144,9 +152,11 @@ export function InTokensCell({ tx }: { tx: TransactionRow }) {
       {tx.in_flight === 1 ? "—" : fmtInt(tx.input_tokens)}
     </span>
   );
-}
+});
 
-export function OutTokensCell({ tx }: { tx: TransactionRow }) {
+export const OutTokensCell = React.memo(function OutTokensCell({
+  tx,
+}: TxProps) {
   if (tx.in_flight === 1) {
     return (
       <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
@@ -172,9 +182,11 @@ export function OutTokensCell({ tx }: { tx: TransactionRow }) {
       {fmtInt(tx.output_tokens)}
     </span>
   );
-}
+});
 
-export function CacheReadCell({ tx }: { tx: TransactionRow }) {
+export const CacheReadCell = React.memo(function CacheReadCell({
+  tx,
+}: TxProps) {
   return (
     <span
       className={cn(
@@ -187,9 +199,11 @@ export function CacheReadCell({ tx }: { tx: TransactionRow }) {
       {tx.in_flight === 1 ? "—" : fmtInt(tx.cache_read)}
     </span>
   );
-}
+});
 
-export function CacheWrite5mCell({ tx }: { tx: TransactionRow }) {
+export const CacheWrite5mCell = React.memo(function CacheWrite5mCell({
+  tx,
+}: TxProps) {
   if (tx.in_flight === 1) {
     return (
       <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
@@ -203,9 +217,11 @@ export function CacheWrite5mCell({ tx }: { tx: TransactionRow }) {
       {fmtInt(v)}
     </span>
   );
-}
+});
 
-export function CacheWrite1hCell({ tx }: { tx: TransactionRow }) {
+export const CacheWrite1hCell = React.memo(function CacheWrite1hCell({
+  tx,
+}: TxProps) {
   if (tx.in_flight === 1) {
     return (
       <span className="block text-right font-mono text-xs tabular-nums text-[var(--color-subtle-foreground)]">
@@ -219,9 +235,9 @@ export function CacheWrite1hCell({ tx }: { tx: TransactionRow }) {
       {fmtInt(v)}
     </span>
   );
-}
+});
 
-export function ToolsCell({ tx }: { tx: TransactionRow }) {
+export const ToolsCell = React.memo(function ToolsCell({ tx }: TxProps) {
   if (tx.in_flight === 1 && tx.tool_choice) {
     const tc = tx.tool_choice;
     const label = tc.startsWith("tool:") ? shortToolName(tc.slice(5)) : tc;
@@ -254,9 +270,9 @@ export function ToolsCell({ tx }: { tx: TransactionRow }) {
       )}
     </div>
   );
-}
+});
 
-export function CostCell({ tx }: { tx: TransactionRow }) {
+export const CostCell = React.memo(function CostCell({ tx }: TxProps) {
   return (
     <span
       className={cn(
@@ -269,7 +285,7 @@ export function CostCell({ tx }: { tx: TransactionRow }) {
       {tx.in_flight === 1 ? "—" : fmtUsd(estimateCostUsd(tx))}
     </span>
   );
-}
+});
 
 /** Accessor helpers — keep filter/sort keys consistent between tables. */
 export const txAccessors = {
