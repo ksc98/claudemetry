@@ -6,14 +6,14 @@ import { shortToolName } from "@/lib/tools";
 import { stopDotClass } from "@/lib/stop";
 import { cn } from "@/lib/cn";
 
-// List endpoints drop user_text / assistant_text / tools_json to keep the
-// recent-turns + session-turns payloads small. The detail view fetches them
-// on-demand from /api/turn the first time the user expands a row, and caches
-// the hydrated row for the session so re-expanding is free.
+// List endpoints drop user_text / assistant_text to keep the recent-turns
+// + session-turns payloads small. The detail view fetches them on-demand
+// from /api/turn the first time the user expands a row, and caches the
+// hydrated row for the session so re-expanding is free.
 const turnDetailCache = new Map<string, TransactionRow>();
 
 function hasDetail(tx: TransactionRow): boolean {
-  return tx.user_text != null || tx.assistant_text != null || tx.tools_json != null;
+  return tx.user_text != null || tx.assistant_text != null;
 }
 
 export function TurnDetail({ tx: initial }: { tx: TransactionRow }) {
