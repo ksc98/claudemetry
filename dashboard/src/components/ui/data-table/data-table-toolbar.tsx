@@ -50,14 +50,14 @@ export function DataTableToolbar<TData>({
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 px-2 text-xs gap-1"
+            className="h-7 px-2 text-xs font-normal gap-1 text-[var(--color-muted-foreground)] hover:text-foreground hover:bg-[var(--color-card-elevated)]"
             onClick={() => {
               onSearchChange("");
               table.resetColumnFilters();
             }}
           >
             Reset
-            <X size={12} />
+            <X size={12} className="opacity-60" />
           </Button>
         )}
         {trailing}

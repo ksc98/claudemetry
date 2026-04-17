@@ -1,6 +1,6 @@
 import * as React from "react";
 import { type Column } from "@tanstack/react-table";
-import { Check, PlusCircle, X } from "lucide-react";
+import { Check, Plus, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,13 +50,13 @@ export function DataTableFacetedFilter<TData, TValue>({
         <Button
           variant="outline"
           size="sm"
-          className="h-7 gap-1.5 border-dashed text-xs"
+          className="h-7 gap-1.5 text-xs font-normal border-[var(--color-border-strong)] bg-[var(--color-card-elevated)] text-[var(--color-muted-foreground)] hover:text-foreground hover:bg-[var(--color-card-elevated)] hover:border-[var(--color-border-strong)] dark:bg-[var(--color-card-elevated)] dark:hover:bg-[var(--color-card-elevated)] data-[state=open]:bg-[var(--color-card-elevated)] data-[state=open]:text-foreground data-[state=open]:border-[var(--color-border-strong)]"
         >
-          <PlusCircle size={12} />
+          <Plus size={12} className="opacity-60" />
           {title}
           {selected.size > 0 && (
             <>
-              <Separator orientation="vertical" className="mx-1 h-3" />
+              <Separator orientation="vertical" className="mx-0.5 h-3" />
               <Badge
                 variant="secondary"
                 className="rounded-sm px-1 font-normal lg:hidden"

@@ -704,9 +704,9 @@ export default function RecentTurnsTable({
         }
         trailing={
           <Button
-            variant="outline"
+            variant="ghost"
             size="sm"
-            className="h-7 text-xs"
+            className="h-7 text-xs font-normal text-[var(--color-muted-foreground)] hover:text-foreground hover:bg-[var(--color-card-elevated)]"
             onClick={() => table.toggleAllRowsExpanded(!allExpanded)}
           >
             {allExpanded ? "Collapse all" : "Expand all"}

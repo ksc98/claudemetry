@@ -25,12 +25,12 @@ export function DataTableViewOptions<TData>({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          variant="outline"
+          variant="ghost"
           size="sm"
-          className="h-7 gap-1.5 text-xs"
+          className="h-7 gap-1.5 text-xs font-normal text-[var(--color-muted-foreground)] hover:text-foreground hover:bg-[var(--color-card-elevated)] data-[state=open]:bg-[var(--color-card-elevated)] data-[state=open]:text-foreground"
           aria-label="Column visibility"
         >
-          <SlidersHorizontal size={12} />
+          <SlidersHorizontal size={12} className="opacity-60" />
           Columns
         </Button>
       </DropdownMenuTrigger>
