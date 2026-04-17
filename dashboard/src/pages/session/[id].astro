@@ -33,8 +33,15 @@ import {
   ArrowUpFromLine,
   Database,
   DollarSign,
-  ArrowLeft,
 } from "lucide-react";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
 
 const sessionId = Astro.params.id;
 if (!sessionId) return Astro.redirect("/");
@@ -177,6 +184,26 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
   sessions={sessionList}
   currentSessionId={sessionId}
 >
+  <Fragment slot="breadcrumb">
+    <div class="px-4 sm:px-6 py-2 border-t border-[var(--color-border)] bg-[var(--color-background)]/60">
+      <Breadcrumb>
+        <BreadcrumbList className="text-xs">
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/" className="text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]">
+              Overview
+            </BreadcrumbLink>
+          </BreadcrumbItem>
+          <BreadcrumbSeparator />
+          <BreadcrumbItem>
+            <BreadcrumbPage className="font-mono text-[var(--color-volume)]">
+              {shortSession(sessionId)}
+            </BreadcrumbPage>
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+    </div>
+  </Fragment>
+
   <WsClient
     client:load
     sessionId={sessionId}
@@ -185,13 +212,6 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
 
   <div class="mb-6 flex items-baseline justify-between gap-4 flex-wrap">
     <div>
-      <a
-        href="/"
-        class="inline-flex items-center gap-1.5 text-xs text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)] mb-2"
-      >
-        <ArrowLeft size={12} />
-        <span>Overview</span>
-      </a>
       <h1 class="text-2xl font-semibold tracking-tight flex items-center gap-3">
         <span>Session</span>
         <code class="font-mono text-[var(--color-volume)] text-xl">
@@ -245,6 +265,8 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
         <KpiCard
           label="Turns"
           value={fmtInt(rows.length)}
+          valueNum={rows.length}
+          valueKind="int"
           sub={`${fmtDuration(avgLatency)} avg`}
           accent="neutral"
           sparkValues={sparkLatency}
@@ -255,6 +277,8 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
         <KpiCard
           label="Output tokens"
           value={fmtInt(totalOutput)}
+          valueNum={totalOutput}
+          valueKind="int"
           sub={`${fmtInt(totalInput)} input`}
           accent="volume"
           sparkValues={sparkOutput}
@@ -265,7 +289,12 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
         <KpiCard
           label="Context peak"
           value={fmtInt(contextPeak)}
-          sub={`${contextDeltaPct >= 0 ? "+" : ""}${contextDeltaPct.toFixed(0)}% from turn 1`}
+          valueNum={contextPeak}
+          valueKind="int"
+          delta={{
+            pct: Math.round(contextDeltaPct),
+            label: "from turn 1",
+          }}
           accent="volume"
           sparkValues={sparkContext}
           sparkMode="line"
@@ -275,6 +304,8 @@ const sparkCost = rows.map((r) => estimateCostUsd(r));
         <KpiCard
           label="Cost"
           value={fmtUsd(totalCost)}
+          valueNum={totalCost}
+          valueKind="usd"
           sub={`${fmtInt(totalCacheRead)} cache read · ${fmtInt(totalCacheCreation)} write`}
           accent="money"
           sparkValues={sparkCost}

@@ -245,6 +245,8 @@ const rateLimit =
         <KpiCard
           label="Turns"
           value={fmtInt(stats.turns)}
+          valueNum={stats.turns}
+          valueKind="int"
           sub={`${fmtDuration(avgLatency)} avg`}
           accent="neutral"
           sparkValues={sparkTurns}
@@ -255,6 +257,8 @@ const rateLimit =
         <KpiCard
           label="Output tokens"
           value={fmtInt(stats.output_tokens)}
+          valueNum={stats.output_tokens}
+          valueKind="int"
           sub={`${fmtInt(stats.input_tokens)} input`}
           accent="volume"
           sparkValues={sparkOutput}
@@ -265,6 +269,8 @@ const rateLimit =
         <KpiCard
           label="Cache hit"
           value={`${(cacheRate * 100).toFixed(0)}%`}
+          valueNum={Math.round(cacheRate * 100)}
+          valueKind="pct"
           sub={
             ttlKnown
               ? `${fmtInt(stats.cache_read)} read · ${longTtlPct.toFixed(0)}% 1h TTL`
@@ -279,6 +285,8 @@ const rateLimit =
         <KpiCard
           label="Cost"
           value={fmtUsd(totalCost)}
+          valueNum={totalCost}
+          valueKind="usd"
           sub={`${fmtInt(stats.turns)} turns · ${totalSessions} sessions`}
           accent="money"
           sparkValues={sparkCost}

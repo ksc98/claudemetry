@@ -9,13 +9,21 @@ import type { SessionSummary } from "@/lib/sessions";
 import { fmtAgo, fmtUsd } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "@/components/CommandPalette";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Kbd, KbdGroup } from "@/components/ui/kbd";
 
 const COLLAPSE_KEY = "sidebar:collapsed";
 
 function shortSession(id: string): string {
   return id.slice(0, 8);
 }
-
 
 export function Sidebar({
   sessions: initialSessions,
@@ -117,7 +125,7 @@ export function Sidebar({
   const activeCount = sessions.filter((s) => s.active).length;
 
   return (
-    <>
+    <TooltipProvider delayDuration={0}>
       <aside
         className={cn(
           "sticky top-0 h-screen flex flex-col border-r border-[var(--color-border)] bg-[var(--color-background)]/95 backdrop-blur-sm transition-[width] duration-200 ease-out shrink-0",
@@ -144,39 +152,27 @@ export function Sidebar({
             )}
           </a>
           {!collapsed && (
-            <button
-              type="button"
-              onClick={toggle}
-              className="text-[var(--color-subtle-foreground)] hover:text-[var(--color-foreground)]"
-              aria-label="Collapse sidebar"
-              title="Collapse"
-            >
-              <PanelLeftClose size={16} />
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={toggle}
+                  className="text-[var(--color-subtle-foreground)] hover:text-[var(--color-foreground)]"
+                  aria-label="Collapse sidebar"
+                >
+                  <PanelLeftClose size={16} />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">Collapse sidebar</TooltipContent>
+            </Tooltip>
           )}
         </div>
 
         <div className="p-2 flex flex-col gap-1">
-          <button
-            type="button"
+          <SearchTrigger
+            collapsed={collapsed}
             onClick={() => setPaletteOpen(true)}
-            className={cn(
-              "group flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-card)] text-[var(--color-subtle-foreground)] hover:text-[var(--color-foreground)] hover:bg-[var(--color-card-elevated)]/60 transition-colors",
-              collapsed ? "justify-center h-9 w-9 mx-auto" : "h-9 px-2.5",
-            )}
-            title="Search (/)"
-            aria-label="Open search"
-          >
-            <Search size={14} />
-            {!collapsed && (
-              <>
-                <span className="text-xs flex-1 text-left">Search…</span>
-                <kbd className="inline-flex items-center rounded border border-[var(--color-border)] bg-[var(--color-card-elevated)] px-1.5 h-4 font-mono text-[9px] text-[var(--color-muted-foreground)]">
-                  /
-                </kbd>
-              </>
-            )}
-          </button>
+          />
 
           <NavLink
             href="/"
@@ -189,6 +185,7 @@ export function Sidebar({
 
         {!collapsed ? (
           <>
+            <Separator className="bg-[var(--color-border)]" />
             <div className="px-3 pt-3 pb-1 flex items-baseline justify-between">
               <span className="text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)]">
                 Sessions
@@ -198,7 +195,7 @@ export function Sidebar({
                 {sessions.length}
               </span>
             </div>
-            <div className="flex-1 overflow-y-auto px-2 pb-3 min-h-0">
+            <ScrollArea className="flex-1 min-h-0 px-2 pb-3">
               {sessions.length === 0 ? (
                 <p className="px-2 py-4 text-[11px] text-[var(--color-subtle-foreground)]">
                   No sessions yet.
@@ -214,6 +211,14 @@ export function Sidebar({
                   ))}
                 </ul>
               )}
+            </ScrollArea>
+            <Separator className="bg-[var(--color-border)]" />
+            <div className="px-3 py-2 flex items-center justify-between text-[10px] text-[var(--color-subtle-foreground)]">
+              <span>Search</span>
+              <KbdGroup>
+                <Kbd>⌘</Kbd>
+                <Kbd>K</Kbd>
+              </KbdGroup>
             </div>
           </>
         ) : (
@@ -234,22 +239,76 @@ export function Sidebar({
         )}
 
         {collapsed && (
-          <div className="p-2 border-t border-[var(--color-border)] flex justify-center">
-            <button
-              type="button"
-              onClick={toggle}
-              className="text-[var(--color-subtle-foreground)] hover:text-[var(--color-foreground)]"
-              aria-label="Expand sidebar"
-              title="Expand"
-            >
-              <PanelLeftOpen size={16} />
-            </button>
-          </div>
+          <>
+            <Separator className="bg-[var(--color-border)]" />
+            <div className="p-2 flex justify-center">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={toggle}
+                    className="text-[var(--color-subtle-foreground)] hover:text-[var(--color-foreground)]"
+                    aria-label="Expand sidebar"
+                  >
+                    <PanelLeftOpen size={16} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">Expand sidebar</TooltipContent>
+              </Tooltip>
+            </div>
+          </>
         )}
       </aside>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
-    </>
+    </TooltipProvider>
+  );
+}
+
+function SearchTrigger({
+  collapsed,
+  onClick,
+}: {
+  collapsed: boolean;
+  onClick: () => void;
+}) {
+  const button = (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "group flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-card)] text-[var(--color-subtle-foreground)] hover:text-[var(--color-foreground)] hover:bg-[var(--color-card-elevated)]/60 transition-colors",
+        collapsed ? "justify-center h-9 w-9 mx-auto" : "h-9 px-2.5 w-full",
+      )}
+      aria-label="Open search"
+    >
+      <Search size={14} />
+      {!collapsed && (
+        <>
+          <span className="text-xs flex-1 text-left">Search…</span>
+          <KbdGroup>
+            <Kbd>⌘</Kbd>
+            <Kbd>K</Kbd>
+          </KbdGroup>
+        </>
+      )}
+    </button>
+  );
+
+  if (!collapsed) return button;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent side="right">
+        <span className="flex items-center gap-2">
+          Search
+          <KbdGroup>
+            <Kbd>⌘</Kbd>
+            <Kbd>K</Kbd>
+          </KbdGroup>
+        </span>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -266,10 +325,9 @@ function NavLink({
   active: boolean;
   collapsed: boolean;
 }) {
-  return (
+  const link = (
     <a
       href={href}
-      title={label}
       aria-current={active ? "page" : undefined}
       className={cn(
         "flex items-center gap-2 rounded-md transition-colors",
@@ -282,6 +340,14 @@ function NavLink({
       <Icon size={14} />
       {!collapsed && <span className="text-xs">{label}</span>}
     </a>
+  );
+
+  if (!collapsed) return link;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{link}</TooltipTrigger>
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
   );
 }
 

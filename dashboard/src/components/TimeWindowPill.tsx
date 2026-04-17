@@ -6,7 +6,7 @@ import {
   parseWindow,
   type Window,
 } from "@/lib/pillWindow";
-import { cn } from "@/lib/cn";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export default function TimeWindowPill() {
   const [win, setWin] = React.useState<Window>(DEFAULT_WINDOW);
@@ -19,31 +19,24 @@ export default function TimeWindowPill() {
   }, []);
 
   return (
-    <div
-      role="tablist"
+    <Tabs
+      value={win}
+      onValueChange={(v) => {
+        if (v !== win) navigateToWindow(v as Window);
+      }}
       aria-label="Time window"
-      className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-card)] p-1"
     >
-      {WINDOWS.map((w) => {
-        const active = w === win;
-        return (
-          <button
+      <TabsList className="h-8 rounded-full border border-[var(--color-border)] bg-[var(--color-card)] p-[3px]">
+        {WINDOWS.map((w) => (
+          <TabsTrigger
             key={w}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            onClick={() => navigateToWindow(w)}
-            className={cn(
-              "px-3 h-7 rounded-full text-xs font-medium tabular-nums transition-colors",
-              active
-                ? "bg-[var(--color-volume)] text-[var(--color-background)]"
-                : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)] hover:bg-[var(--color-card-elevated)]",
-            )}
+            value={w}
+            className="h-full rounded-full px-3 text-xs font-medium tabular-nums data-[state=active]:bg-[var(--color-volume-muted)] data-[state=active]:text-[var(--color-foreground)] data-[state=active]:shadow-[inset_0_0_0_1px_var(--color-border-strong)] dark:data-[state=active]:bg-[var(--color-volume-muted)]"
           >
             {w}
-          </button>
-        );
-      })}
-    </div>
+          </TabsTrigger>
+        ))}
+      </TabsList>
+    </Tabs>
   );
 }

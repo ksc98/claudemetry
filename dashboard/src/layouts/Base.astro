@@ -2,6 +2,14 @@
 import "@/styles/global.css";
 import { Sidebar } from "@/components/Sidebar";
 import type { SessionSummary } from "@/lib/sessions";
+import {
+  DollarSign,
+  Flame,
+  MessageSquare,
+  Layers,
+  AlertTriangle,
+  Gauge,
+} from "lucide-react";
 
 interface Props {
   title?: string;
@@ -64,9 +72,9 @@ function fmtBurn(n: number): string {
     />
     <div class="flex-1 flex flex-col min-w-0">
     <header class="sticky top-0 z-20 backdrop-blur-xl bg-[var(--color-background)]/80 border-b border-[var(--color-border)]">
-      <div class="px-6 h-14 flex items-center justify-between gap-6">
-        <div class="flex items-center gap-6">
-          <span class="text-xs text-[var(--color-muted-foreground)] hidden sm:inline">Claude Code observability</span>
+      <div class="px-4 sm:px-6 h-14 flex items-center justify-between gap-3 sm:gap-6">
+        <div class="flex items-center gap-3 sm:gap-6 min-w-0">
+          <span class="text-xs text-[var(--color-muted-foreground)] hidden sm:inline whitespace-nowrap">Claude Code observability</span>
           {
             headerStats && (
               <div
@@ -74,7 +82,10 @@ function fmtBurn(n: number): string {
                 class="hidden md:flex items-center gap-3 pl-4 border-l border-[var(--color-border)] text-xs text-[var(--color-muted-foreground)]"
               >
                 {headerStats.activeSession ? (
-                  <span class="flex items-center gap-1.5">
+                  <span
+                    class="flex items-center gap-1.5"
+                    title={`Active session: ${headerStats.activeSession}`}
+                  >
                     <span class="live-dot" />
                     <span class="font-medium text-[var(--color-good)]">active</span>
                     <code class="font-mono text-[var(--color-foreground)] text-[0.6875rem]">
@@ -82,37 +93,55 @@ function fmtBurn(n: number): string {
                     </code>
                   </span>
                 ) : (
-                  <span class="flex items-center gap-1.5">
+                  <span class="flex items-center gap-1.5" title="No active session">
                     <span class="inline-block w-2 h-2 rounded-full bg-[var(--color-subtle-foreground)]" />
                     <span class="font-medium text-[var(--color-muted-foreground)]">idle</span>
                   </span>
                 )}
                 <span class="text-[var(--color-subtle-foreground)]">·</span>
-                <span class="tabular-nums font-mono">
+                <span
+                  class="inline-flex items-center gap-1 tabular-nums font-mono"
+                  title="Total spend in the current window"
+                >
+                  <DollarSign size={11} className="text-[var(--color-money)] opacity-70" />
                   <span class="text-[var(--color-money)] font-medium">{fmtUsd(headerStats.spendUsd)}</span>
                 </span>
                 {headerStats.burnUsdPerMin != null && headerStats.burnUsdPerMin > 0 && (
                   <>
                     <span class="text-[var(--color-subtle-foreground)]">·</span>
                     <span
-                      class="tabular-nums font-mono text-[var(--color-money)]/80"
+                      class="inline-flex items-center gap-1 tabular-nums font-mono text-[var(--color-money)]/80"
                       title="Trailing 5-minute burn rate"
                     >
+                      <Flame size={11} className="opacity-70" />
                       {fmtBurn(headerStats.burnUsdPerMin)}
                     </span>
                   </>
                 )}
                 <span class="text-[var(--color-subtle-foreground)]">·</span>
-                <span class="tabular-nums font-mono">{headerStats.turns} turns</span>
+                <span
+                  class="inline-flex items-center gap-1 tabular-nums font-mono"
+                  title={`${headerStats.turns} turns in the current window`}
+                >
+                  <MessageSquare size={11} className="opacity-60" />
+                  {headerStats.turns} turns
+                </span>
                 <span class="text-[var(--color-subtle-foreground)]">·</span>
-                <span class="tabular-nums font-mono">{headerStats.sessions} sessions</span>
+                <span
+                  class="inline-flex items-center gap-1 tabular-nums font-mono"
+                  title={`${headerStats.sessions} sessions in the current window`}
+                >
+                  <Layers size={11} className="opacity-60" />
+                  {headerStats.sessions} sessions
+                </span>
                 {headerStats.errorRate != null && headerStats.errorRate > 0 && (
                   <>
                     <span class="text-[var(--color-subtle-foreground)]">·</span>
                     <span
-                      class="tabular-nums font-mono text-[var(--color-danger)] font-medium"
+                      class="inline-flex items-center gap-1 tabular-nums font-mono text-[var(--color-danger)] font-medium"
                       title="Fraction of recent turns with status ≥ 400"
                     >
+                      <AlertTriangle size={11} />
                       {(headerStats.errorRate * 100).toFixed(headerStats.errorRate < 0.1 ? 1 : 0)}% err
                     </span>
                   </>
@@ -128,6 +157,7 @@ function fmtBurn(n: number): string {
                         class="inline-flex items-center gap-1.5 tabular-nums"
                         title={`Anthropic rate-limit — ${tokRemaining.toLocaleString()} / ${tokLimit.toLocaleString()} input tokens remaining this window`}
                       >
+                        <Gauge size={11} className="opacity-60" />
                         <span
                           class="inline-flex overflow-hidden rounded-full bg-[var(--color-border)]"
                           style={`width:32px;height:4px;`}
@@ -146,8 +176,33 @@ function fmtBurn(n: number): string {
               </div>
             )
           }
+          {/* Compact mobile KPI row — only active/spend, visible below md.
+              Wrapped in the same live-region so the 10s poll updates it too.
+              The inner data-live-mobile sentinel is replaced alongside the
+              desktop row in a single innerHTML swap. */}
+          {
+            headerStats && (
+              <div
+                data-live-region="header-stats-mobile"
+                class="flex md:hidden items-center gap-2 pl-3 border-l border-[var(--color-border)] text-xs text-[var(--color-muted-foreground)] min-w-0"
+              >
+                {headerStats.activeSession ? (
+                  <span class="flex items-center gap-1 shrink-0">
+                    <span class="live-dot" />
+                    <span class="font-medium text-[var(--color-good)]">live</span>
+                  </span>
+                ) : (
+                  <span class="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-subtle-foreground)] shrink-0" />
+                )}
+                <span class="text-[var(--color-money)] font-medium font-mono tabular-nums">
+                  {fmtUsd(headerStats.spendUsd)}
+                </span>
+              </div>
+            )
+          }
         </div>
       </div>
+      <slot name="breadcrumb" />
     </header>
     <main class="px-6 py-8 w-full max-w-7xl mx-auto">
       <slot />

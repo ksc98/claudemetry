@@ -7,6 +7,15 @@ import {
   Loader2,
   AlertCircle,
 } from "lucide-react";
+import { Command as CommandPrimitive } from "cmdk";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { fmtAgo } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
@@ -50,23 +59,18 @@ export function CommandPalette({
   const [query, setQuery] = React.useState("");
   const [mode, setMode] = React.useState<Mode>("hybrid");
   const [state, setState] = React.useState<State>({ kind: "idle" });
-  const [active, setActive] = React.useState(0);
   const reqIdRef = React.useRef(0);
-  const inputRef = React.useRef<HTMLInputElement>(null);
-  const listRef = React.useRef<HTMLOListElement>(null);
 
-  // Focus input on open; reset when closed.
+  // Reset when closed.
   React.useEffect(() => {
-    if (open) {
-      requestAnimationFrame(() => inputRef.current?.focus());
-    } else {
+    if (!open) {
       setQuery("");
       setState({ kind: "idle" });
-      setActive(0);
     }
   }, [open]);
 
-  // Debounced search.
+  // Debounced search — unchanged contract: 250ms debounce, abort + reqId gating,
+  // 2-char minimum, 429 retry_after passthrough, 4xx message surfacing.
   React.useEffect(() => {
     if (!open) return;
     const q = query.trim();
@@ -103,7 +107,6 @@ export function CommandPalette({
         }
         const data = (await res.json()) as { mode: Mode; results: Hit[] };
         setState({ kind: "results", mode: data.mode, hits: data.results, query: q });
-        setActive(0);
       } catch (e) {
         if (myReqId !== reqIdRef.current) return;
         if ((e as Error).name === "AbortError") return;
@@ -116,140 +119,102 @@ export function CommandPalette({
     };
   }, [query, mode, open]);
 
-  // Global keyboard: Escape closes; arrows navigate; Enter opens selected hit.
-  React.useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (state.kind !== "results" || state.hits.length === 0) return;
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setActive((i) => Math.min(state.hits.length - 1, i + 1));
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setActive((i) => Math.max(0, i - 1));
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        const hit = state.hits[active];
-        if (hit) openHit(hit);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, state, active]);
-
-  // Keep active hit in view.
-  React.useEffect(() => {
-    if (state.kind !== "results") return;
-    const el = listRef.current?.querySelector<HTMLLIElement>(
-      `li[data-idx="${active}"]`,
-    );
-    el?.scrollIntoView({ block: "nearest" });
-  }, [active, state]);
-
   const openHit = (hit: Hit) => {
     if (!hit.session_id) return;
     window.location.href = `/session/${encodeURIComponent(hit.session_id)}#${encodeURIComponent(hit.tx_id)}`;
   };
 
-  if (!open) return null;
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-24 sm:pt-32"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Search"
+    <CommandDialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v) onClose();
+      }}
+      showCloseButton={false}
+      title="Search sessions"
+      description="Search sessions, prompts, and responses."
+      className="overflow-visible p-0 sm:max-w-2xl"
+      // shouldFilter=false: preserve server-side ranking; cmdk should not reorder hits.
+      shouldFilter={false}
     >
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={onClose}
-      />
-      <div className="relative w-full max-w-2xl rounded-lg border border-[var(--color-border)] bg-[var(--color-card)] shadow-2xl shadow-black/40">
-        <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3">
-          <Search className="size-4 text-[var(--color-subtle-foreground)]" />
-          <input
-            ref={inputRef}
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search sessions, prompts, responses…"
-            autoComplete="off"
-            spellCheck={false}
-            className="flex-1 h-12 bg-transparent text-sm outline-none placeholder:text-[var(--color-subtle-foreground)]"
-          />
-          <div className="flex items-center gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-card-elevated)]/40 p-0.5">
-            {MODES.map((m) => {
-              const isActive = mode === m.value;
-              return (
-                <button
-                  key={m.value}
-                  type="button"
-                  onClick={() => setMode(m.value)}
-                  title={m.hint}
-                  className={cn(
-                    "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] font-medium transition-colors",
-                    isActive
-                      ? "bg-[var(--color-card)] text-[var(--color-foreground)] shadow-[inset_0_0_0_1px_var(--color-border)]"
-                      : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
-                  )}
-                >
-                  <m.Icon className="size-3" />
-                  {m.label}
-                </button>
-              );
-            })}
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-[10px] px-1.5 py-0.5 rounded border border-[var(--color-border)] text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)] font-mono"
-            aria-label="Close (Esc)"
-          >
-            esc
-          </button>
+      {/* Top row: search input + mode toggle + esc hint. */}
+      <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3">
+        <Search className="size-4 shrink-0 text-[var(--color-subtle-foreground)]" />
+        <CommandPrimitive.Input
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Search sessions, prompts, responses…"
+          autoFocus
+          className="flex-1 h-12 bg-transparent text-sm outline-none placeholder:text-[var(--color-subtle-foreground)]"
+        />
+        <div className="flex items-center gap-0.5 rounded-md border border-[var(--color-border)] bg-[var(--color-card-elevated)]/40 p-0.5">
+          {MODES.map((m) => {
+            const isActive = mode === m.value;
+            return (
+              <button
+                key={m.value}
+                type="button"
+                onClick={() => setMode(m.value)}
+                title={m.hint}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] font-medium transition-colors",
+                  isActive
+                    ? "bg-[var(--color-card)] text-[var(--color-foreground)] shadow-[inset_0_0_0_1px_var(--color-border)]"
+                    : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
+                )}
+              >
+                <m.Icon className="size-3" />
+                {m.label}
+              </button>
+            );
+          })}
         </div>
-        <div className="max-h-[60vh] overflow-y-auto px-2 py-2">
-          <Body
-            state={state}
-            mode={mode}
-            query={query.trim()}
-            active={active}
-            listRef={listRef}
-            onPick={openHit}
-            onHover={setActive}
-          />
-        </div>
-        <div className="border-t border-[var(--color-border)] px-3 py-2 flex items-center gap-3 text-[10px] text-[var(--color-subtle-foreground)] font-mono">
-          <span><kbd className="inline-flex items-center rounded border border-[var(--color-border)] bg-[var(--color-card-elevated)] px-1 py-0 font-mono text-[9px] text-[var(--color-muted-foreground)]">↑</kbd> <kbd className="inline-flex items-center rounded border border-[var(--color-border)] bg-[var(--color-card-elevated)] px-1 py-0 font-mono text-[9px] text-[var(--color-muted-foreground)]">↓</kbd> navigate</span>
-          <span><kbd className="inline-flex items-center rounded border border-[var(--color-border)] bg-[var(--color-card-elevated)] px-1 py-0 font-mono text-[9px] text-[var(--color-muted-foreground)]">enter</kbd> open</span>
-          <span><kbd className="inline-flex items-center rounded border border-[var(--color-border)] bg-[var(--color-card-elevated)] px-1 py-0 font-mono text-[9px] text-[var(--color-muted-foreground)]">esc</kbd> close</span>
-        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="font-mono text-[10px] px-1.5 py-0.5 rounded border border-[var(--color-border)] text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]"
+          aria-label="Close (Esc)"
+        >
+          esc
+        </button>
       </div>
-    </div>
+
+      <CommandList className="max-h-[60vh] overflow-y-auto px-1 py-1">
+        <Body state={state} mode={mode} query={query.trim()} onPick={openHit} />
+      </CommandList>
+
+      <div className="border-t border-[var(--color-border)] px-3 py-2 flex items-center gap-3 text-[10px] text-[var(--color-subtle-foreground)]">
+        <KbdGroup>
+          <Kbd className="text-[9px]">↑</Kbd>
+          <Kbd className="text-[9px]">↓</Kbd>
+          <span>navigate</span>
+        </KbdGroup>
+        <KbdGroup>
+          <Kbd className="text-[9px]">enter</Kbd>
+          <span>open</span>
+        </KbdGroup>
+        <KbdGroup>
+          <Kbd className="text-[9px]">esc</Kbd>
+          <span>close</span>
+        </KbdGroup>
+      </div>
+    </CommandDialog>
   );
 }
 
+// Custom wrapper around CommandInput — the shadcn default renders its own
+// icon and padding; we lay out icon/mode-toggle/esc in the outer flex, so we
+// only want the input itself, stripped of the built-in wrapper.
 function Body({
   state,
   mode,
   query,
-  active,
-  listRef,
   onPick,
-  onHover,
 }: {
   state: State;
   mode: Mode;
   query: string;
-  active: number;
-  listRef: React.RefObject<HTMLOListElement | null>;
   onPick: (h: Hit) => void;
-  onHover: (i: number) => void;
 }) {
   if (state.kind === "idle") {
     return (
@@ -281,86 +246,70 @@ function Body({
   }
   if (state.hits.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
-        <Search className="size-5 text-[var(--color-subtle-foreground)]" />
-        <div className="text-xs text-[var(--color-muted-foreground)]">
-          No matches for{" "}
-          <span className="font-medium text-[var(--color-foreground)]">
-            “{state.query}”
-          </span>
-          .
-        </div>
-        {mode === "vector" ? (
-          <div className="text-[11px] text-[var(--color-subtle-foreground)]">
-            Try another phrasing, or switch to Keyword / Hybrid.
+      <CommandEmpty>
+        <div className="flex flex-col items-center justify-center gap-2 px-4 py-4 text-center">
+          <Search className="size-5 text-[var(--color-subtle-foreground)]" />
+          <div className="text-xs text-[var(--color-muted-foreground)]">
+            No matches for{" "}
+            <span className="font-medium text-[var(--color-foreground)]">
+              “{state.query}”
+            </span>
+            .
           </div>
-        ) : null}
-      </div>
+          {mode === "vector" ? (
+            <div className="text-[11px] text-[var(--color-subtle-foreground)]">
+              Try another phrasing, or switch to Keyword / Hybrid.
+            </div>
+          ) : null}
+        </div>
+      </CommandEmpty>
     );
   }
   return (
-    <ol ref={listRef} className="flex flex-col gap-0.5">
-      {state.hits.map((h, i) => (
-        <HitRow
-          key={h.tx_id}
-          hit={h}
-          active={i === active}
-          idx={i}
-          onPick={onPick}
-          onHover={onHover}
-        />
+    <CommandGroup className="p-0">
+      {state.hits.map((h) => (
+        <HitItem key={h.tx_id} hit={h} onPick={onPick} />
       ))}
-    </ol>
+    </CommandGroup>
   );
 }
 
-function HitRow({
+function HitItem({
   hit,
-  active,
-  idx,
   onPick,
-  onHover,
 }: {
   hit: Hit;
-  active: boolean;
-  idx: number;
   onPick: (h: Hit) => void;
-  onHover: (i: number) => void;
 }) {
   return (
-    <li data-idx={idx}>
-      <button
-        type="button"
-        onMouseEnter={() => onHover(idx)}
-        onClick={() => onPick(hit)}
-        className={cn(
-          "group block w-full rounded-md px-2.5 py-2 text-left",
-          active
-            ? "bg-[var(--color-card-elevated)]/80"
-            : "hover:bg-[var(--color-card-elevated)]/40",
-        )}
-      >
-        <div className="mb-1 flex items-center gap-2 text-[10.5px]">
-          <MatchBadge source={hit.match_source} />
-          {hit.model ? (
-            <span className="font-mono text-[var(--color-muted-foreground)]">
-              {hit.model}
-            </span>
-          ) : null}
-          <span className="text-[var(--color-subtle-foreground)]">·</span>
-          <span className="text-[var(--color-subtle-foreground)]">
-            {fmtAgo(hit.ts)}
+    <CommandItem
+      // Include snippets in the searchable value so cmdk's internal key-based
+      // selection still works, but shouldFilter=false on the Command means
+      // order and inclusion are preserved from the server.
+      value={`${hit.tx_id}`}
+      onSelect={() => onPick(hit)}
+      className="flex-col items-stretch gap-1 !p-2.5 data-[selected=true]:bg-[var(--color-card-elevated)]/80"
+    >
+      <div className="flex items-center gap-2 text-[10.5px]">
+        <MatchBadge source={hit.match_source} />
+        {hit.model ? (
+          <span className="font-mono text-[var(--color-muted-foreground)]">
+            {hit.model}
           </span>
-          <span className="ml-auto font-mono tabular-nums text-[var(--color-subtle-foreground)]">
-            {hit.score.toFixed(3)}
-          </span>
-        </div>
-        <div className="flex flex-col gap-0.5">
-          {hit.user_snip ? <Snip role="you" text={hit.user_snip} /> : null}
-          {hit.asst_snip ? <Snip role="asst" text={hit.asst_snip} /> : null}
-        </div>
-      </button>
-    </li>
+        ) : null}
+        <span className="text-[var(--color-subtle-foreground)]">·</span>
+        <span className="text-[var(--color-subtle-foreground)]">
+          {fmtAgo(hit.ts)}
+        </span>
+        <span className="ml-auto font-mono tabular-nums text-[var(--color-subtle-foreground)]">
+          {hit.score.toFixed(3)}
+        </span>
+      </div>
+      <div className="flex flex-col gap-0.5">
+        {hit.user_snip ? <Snip role="you" text={hit.user_snip} /> : null}
+        {hit.asst_snip ? <Snip role="asst" text={hit.asst_snip} /> : null}
+      </div>
+    </CommandItem>
   );
 }
 
