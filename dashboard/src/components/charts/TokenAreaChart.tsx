@@ -48,6 +48,28 @@ function fmtUsd(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
+// Next power of 10 above `max`. recharts' log-scale tick auto-picker stops
+// at the largest power of 10 ≤ dataMax, so without this the top tick reads
+// "100k" even when the real max is 428k. +1 on the exponent also handles
+// exact-power inputs so the domain always exceeds the data.
+function logCeiling(max: number): number {
+  if (!Number.isFinite(max) || max <= 1) return 10;
+  return Math.pow(10, Math.floor(Math.log10(max)) + 1);
+}
+
+function logTicks(ceiling: number): number[] {
+  const ticks: number[] = [];
+  for (let v = 1; v <= ceiling; v *= 10) ticks.push(v);
+  return ticks;
+}
+
+const TOKEN_KEYS: readonly (keyof TokenAreaPoint)[] = [
+  "cache_read",
+  "cache_creation",
+  "output",
+  "input",
+];
+
 export default function TokenAreaChart({
   data,
   xKey,
@@ -108,6 +130,27 @@ export default function TokenAreaChart({
     [instanceId],
   );
 
+  // Log scale only: compute the highest token value across all series, then
+  // round the domain up to the next power of 10 so there's always a labeled
+  // tick above the data. Linear scale uses recharts' built-in "nice" ticks.
+  const { logDomain, logTickValues } = useMemo(() => {
+    if (yScale !== "log") {
+      return { logDomain: undefined, logTickValues: undefined };
+    }
+    let m = 1;
+    for (const d of data) {
+      for (const k of TOKEN_KEYS) {
+        const v = d[k];
+        if (typeof v === "number" && v > m) m = v;
+      }
+    }
+    const ceiling = logCeiling(m);
+    return {
+      logDomain: [1, ceiling] as [number, number],
+      logTickValues: logTicks(ceiling),
+    };
+  }, [data, yScale]);
+
   return (
     <div
       ref={wrapRef}
@@ -158,12 +201,13 @@ export default function TokenAreaChart({
           <YAxis
             yAxisId="tokens"
             scale={yScale}
-            domain={yScale === "log" ? [1, "dataMax"] : undefined}
+            domain={logDomain}
+            ticks={logTickValues}
             tickFormatter={fmtTokens}
             axisLine={false}
             tickLine={false}
             tick={{ fill: "var(--color-muted-foreground)", fontSize: 11 }}
-            width={yScale === "log" ? 40 : 44}
+            width={44}
             allowDataOverflow={false}
           />
           <YAxis
