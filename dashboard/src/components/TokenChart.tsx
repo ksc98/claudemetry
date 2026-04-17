@@ -26,21 +26,34 @@ function rowsToPoints(rows: TransactionRow[], win: Window): Point[] {
 
   const bucketMs = BUCKET_MS[win];
 
+  // Zero → null so the chart draws a gap at that point instead of a line
+  // hugging the baseline. Honest representation of "no data for this
+  // series this turn," and required for log scale (log(0) is undefined).
+  const gap = (n: number) => (n > 0 ? n : null);
+
   // Small windows: individual turns.
   if (bucketMs === 0) {
     return filtered.map((r) => ({
       ts: r.ts,
-      input: Math.max(r.input_tokens, 1),
-      output: Math.max(r.output_tokens, 1),
-      cache_read: Math.max(r.cache_read, 1),
-      cache_creation: Math.max(r.cache_creation, 1),
+      input: gap(r.input_tokens),
+      output: gap(r.output_tokens),
+      cache_read: gap(r.cache_read),
+      cache_creation: gap(r.cache_creation),
       cost: estimateCostUsd(r),
     }));
   }
 
   // Bucket: average tokens per turn, sum cost.
   const firstTs = filtered[0].ts;
-  type Acc = Point & { n: number };
+  type Acc = {
+    ts: number;
+    input: number;
+    output: number;
+    cache_read: number;
+    cache_creation: number;
+    cost: number;
+    n: number;
+  };
   const buckets = new Map<number, Acc>();
 
   for (const r of filtered) {
@@ -70,10 +83,10 @@ function rowsToPoints(rows: TransactionRow[], win: Window): Point[] {
     .sort((a, b) => a.ts - b.ts)
     .map((p) => ({
       ts: p.ts,
-      input: Math.max(Math.round(p.input / p.n), 1),
-      output: Math.max(Math.round(p.output / p.n), 1),
-      cache_read: Math.max(Math.round(p.cache_read / p.n), 1),
-      cache_creation: Math.max(Math.round(p.cache_creation / p.n), 1),
+      input: gap(Math.round(p.input / p.n)),
+      output: gap(Math.round(p.output / p.n)),
+      cache_read: gap(Math.round(p.cache_read / p.n)),
+      cache_creation: gap(Math.round(p.cache_creation / p.n)),
       cost: p.cost,
     }));
 }
@@ -132,7 +145,8 @@ export default function TokenChart({
       xKey="ts"
       xTickFormatter={(v) => fmtTs(v, win)}
       xLabelFormatter={(v) => fmtTs(v as number, win)}
-      yScale="linear"
+      yScale="log"
+      linearThreshold={200_000}
       linearTickStep={100_000}
       instanceId="tokenChart"
       showBrush={showBrush}

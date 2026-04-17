@@ -12,13 +12,16 @@ import {
 import ChartTooltipCard from "./ChartTooltipCard";
 
 export type TokenAreaPoint = {
-  input: number;
-  output: number;
-  cache_read: number;
-  cache_creation: number;
+  // Token series use `number | null`; null renders as a gap in the area
+  // (the only honest representation of "this turn had no input/output of
+  // this kind" on a log scale, where 0 isn't a real coordinate).
+  input: number | null;
+  output: number | null;
+  cache_read: number | null;
+  cache_creation: number | null;
   cost: number;
   // xKey is dynamic (either "ts" or "turn")
-  [k: string]: number;
+  [k: string]: number | null;
 };
 
 interface Props {
@@ -29,6 +32,9 @@ interface Props {
   yScale: "log" | "linear";
   /** For linear scale: force ticks at this step (e.g. 10_000). Ignored on log. */
   linearTickStep?: number;
+  /** Log scale only: switch to linear ticks of `linearTickStep` at/above this
+   * value (e.g. 200_000). Below the threshold, standard log decades apply. */
+  linearThreshold?: number;
   /** Unique prefix for SVG <defs> ids (avoids collisions when >1 chart on page). */
   instanceId: string;
   /** Enable recharts Brush slider beneath the chart. */
@@ -70,6 +76,34 @@ function logTicks(ceiling: number): number[] {
   return ticks;
 }
 
+// Log scale with linear top: decade ticks up to `linearThreshold`, then the
+// given linear step above. The visual is still log (low values stay
+// readable), but the upper region gains 100k/200k/… reference gridlines
+// instead of only the decade jump. Used when tokens routinely span 5+
+// orders of magnitude but the "interesting" zone sits above 100k.
+function hybridLogLinearTicks(
+  max: number,
+  linearThreshold: number,
+  linearStep: number,
+): { ticks: number[]; ceiling: number } {
+  if (!Number.isFinite(max) || max <= 1) {
+    return { ticks: [1, 10], ceiling: 10 };
+  }
+  const ticks: number[] = [];
+  // Decades up to (but not past) the threshold.
+  for (let v = 1; v < linearThreshold; v *= 10) ticks.push(v);
+  ticks.push(linearThreshold);
+  if (max <= linearThreshold) {
+    return { ticks, ceiling: linearThreshold };
+  }
+  // Linear increments above the threshold up to the smallest multiple ≥ max.
+  const ceiling = Math.ceil(max / linearStep) * linearStep;
+  for (let v = linearThreshold + linearStep; v <= ceiling; v += linearStep) {
+    ticks.push(v);
+  }
+  return { ticks, ceiling };
+}
+
 // Linear ticks at a fixed step up to the smallest multiple ≥ max.
 // Used on the overview chart so token magnitudes read as plain 10k/20k/…
 // rather than the log decades, even though cache_read dominates visually.
@@ -95,6 +129,7 @@ export default function TokenAreaChart({
   xLabelFormatter,
   yScale,
   linearTickStep,
+  linearThreshold,
   instanceId,
   showBrush = false,
   showCostDots = false,
@@ -149,8 +184,10 @@ export default function TokenAreaChart({
     [instanceId],
   );
 
-  // Compute domain + ticks for the token axis. Log snaps to 1/2/5 × 10ⁿ;
-  // linear with a fixed step produces flat 10k/20k/… ticks for readability.
+  // Compute domain + ticks for the token axis. Three modes:
+  //   log: decade ticks, ceiling snapped to 1/2/5 × 10ⁿ
+  //   log + linearThreshold: decade ticks below threshold, linear step above
+  //   linear + linearTickStep: flat 10k/100k/… ticks
   const { yDomain, yTicks } = useMemo(() => {
     let m = 1;
     for (const d of data) {
@@ -160,6 +197,14 @@ export default function TokenAreaChart({
       }
     }
     if (yScale === "log") {
+      if (linearThreshold && linearTickStep) {
+        const { ticks, ceiling } = hybridLogLinearTicks(
+          m,
+          linearThreshold,
+          linearTickStep,
+        );
+        return { yDomain: [1, ceiling] as [number, number], yTicks: ticks };
+      }
       const ceiling = logCeiling(m);
       return {
         yDomain: [1, ceiling] as [number, number],
@@ -174,7 +219,7 @@ export default function TokenAreaChart({
       };
     }
     return { yDomain: undefined, yTicks: undefined };
-  }, [data, yScale, linearTickStep]);
+  }, [data, yScale, linearTickStep, linearThreshold]);
 
   return (
     <div
