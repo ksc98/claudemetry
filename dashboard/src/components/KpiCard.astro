@@ -1,13 +1,32 @@
 ---
 import Sparkline from "./Sparkline.astro";
+import KpiValue, { type KpiValueKind } from "./KpiValue";
+import { ArrowDownRight, ArrowUpRight, Minus } from "lucide-react";
+
+interface DeltaProps {
+  /** Whole-number percent change vs prior period. Positive = up, negative = down. */
+  pct: number;
+  /** Shown muted after the number, e.g. "vs prior 1h". */
+  label?: string;
+  /** For metrics where a rise is bad (error rate, latency). Flips the accent color. */
+  invert?: boolean;
+}
 
 interface Props {
   label: string;
+  /** Pre-formatted display string. Used for SSR and when `valueNum` is omitted. */
   value: string;
   sub?: string;
   accent?: "volume" | "money" | "neutral";
   sparkValues?: number[];
   sparkMode?: "line" | "bars";
+  /** When provided, the numeric value animates via @number-flow/react on hydration. */
+  valueNum?: number;
+  valueKind?: KpiValueKind;
+  /** Optional small trend badge below the number. */
+  delta?: DeltaProps;
+  /** Optional drill-through link; wraps the whole card in an <a>. */
+  href?: string;
 }
 
 const {
@@ -17,6 +36,10 @@ const {
   accent = "neutral",
   sparkValues = [],
   sparkMode = "line",
+  valueNum,
+  valueKind = "int",
+  delta,
+  href,
 } = Astro.props;
 
 const sparkColor =
@@ -30,32 +53,126 @@ const valueClass =
   accent === "money"
     ? "text-[var(--color-money)]"
     : "text-[var(--color-foreground)]";
+
+const iconClass =
+  accent === "money"
+    ? "text-[var(--color-money)]"
+    : accent === "volume"
+      ? "text-[var(--color-volume)]"
+      : "text-[var(--color-muted-foreground)]";
+
+// Delta tint: by default up is good (volume/neutral accents) or positive
+// for money (more spend is informational, we tint neutral instead of good).
+// `invert` flips the semantic so rising error-rate reads red.
+let deltaTone: "good" | "danger" | "muted" = "muted";
+if (delta && delta.pct !== 0) {
+  const isUp = delta.pct > 0;
+  if (delta.invert) {
+    deltaTone = isUp ? "danger" : "good";
+  } else if (accent === "money") {
+    deltaTone = "muted";
+  } else {
+    deltaTone = isUp ? "good" : "muted";
+  }
+}
+const deltaColorClass =
+  deltaTone === "good"
+    ? "text-[var(--color-good)]"
+    : deltaTone === "danger"
+      ? "text-[var(--color-danger)]"
+      : "text-[var(--color-muted-foreground)]";
+
+const hasSpark = sparkValues.length > 1;
+const CardTag = href ? "a" : "div";
 ---
 
-<div class="card card-hover p-5 overflow-hidden">
-  <div class="flex items-start justify-between mb-4">
+<CardTag
+  href={href}
+  class:list={[
+    "card card-hover p-5 overflow-hidden relative block kpi-card",
+    href && "cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-strong)]",
+  ]}
+>
+  {hasSpark && (
+    <div
+      aria-hidden="true"
+      class="pointer-events-none absolute inset-x-0 bottom-0 opacity-35"
+      style="height: 68%;"
+    >
+      <Sparkline
+        values={sparkValues}
+        mode={sparkMode}
+        color={sparkColor}
+        width={320}
+        height={96}
+        fillOpacity={0.22}
+        strokeWidth={1.25}
+      />
+    </div>
+  )}
+
+  <div class="relative flex items-start justify-between mb-4">
     <p class="text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)] font-medium">
       {label}
     </p>
-    <div class="text-[var(--color-muted-foreground)]">
+    <div class={iconClass}>
       <slot name="icon" />
     </div>
   </div>
-  <div class="flex items-end justify-between gap-3">
-    <div class="min-w-0">
-      <p class={`font-mono text-3xl font-semibold tracking-tight tabular-nums ${valueClass}`}>
-        {value}
-      </p>
-      {sub && (
-        <p class="text-xs text-[var(--color-subtle-foreground)] mt-1 tabular-nums">
-          {sub}
-        </p>
+
+  <div class="relative">
+    <p class={`font-mono text-3xl font-semibold tracking-tight tabular-nums ${valueClass}`}>
+      {valueNum != null ? (
+        <KpiValue client:load num={valueNum} kind={valueKind} />
+      ) : (
+        value
       )}
-    </div>
-    {sparkValues.length > 1 && (
-      <div class="opacity-90 min-w-0 shrink">
-        <Sparkline values={sparkValues} mode={sparkMode} color={sparkColor} />
+    </p>
+
+    {(sub || delta) && (
+      <div class="mt-1 flex items-center gap-2 flex-wrap">
+        {delta && (
+          <span class={`inline-flex items-center gap-0.5 text-[0.6875rem] font-medium tabular-nums ${deltaColorClass}`}>
+            {delta.pct > 0 ? (
+              <ArrowUpRight size={12} />
+            ) : delta.pct < 0 ? (
+              <ArrowDownRight size={12} />
+            ) : (
+              <Minus size={12} />
+            )}
+            <span>{delta.pct > 0 ? "+" : ""}{delta.pct.toFixed(0)}%</span>
+            {delta.label && (
+              <span class="text-[var(--color-subtle-foreground)] font-normal ml-1">{delta.label}</span>
+            )}
+          </span>
+        )}
+        {sub && (
+          <p class="text-xs text-[var(--color-subtle-foreground)] tabular-nums">
+            {sub}
+          </p>
+        )}
       </div>
     )}
   </div>
-</div>
+</CardTag>
+
+<style>
+  .kpi-card {
+    animation: kpi-card-in 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  @keyframes kpi-card-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .kpi-card {
+      animation: none;
+    }
+  }
+</style>

@@ -2,15 +2,22 @@
 // Pure-SVG sparkline, server-rendered, no JS.
 // Modes:
 //   "line"  — polyline, good for rolling averages / rates
+//   "area"  — polyline with a gradient fill below (airier than line+alpha)
 //   "bars"  — vertical bars, good for per-turn distribution
 interface Props {
   values: number[];
-  mode?: "line" | "bars";
+  mode?: "line" | "area" | "bars";
   width?: number;
   height?: number;
   color?: string; // any CSS color or var(--color-*)
   fillOpacity?: number;
   strokeWidth?: number;
+  /** Horizontal line at the mean of `values`. */
+  showBaseline?: boolean;
+  /** Render small dots at the min and max points (line/area modes only). */
+  showMinMax?: boolean;
+  /** Optional trend glyph rendered top-right. When omitted, derived from first/last. */
+  trend?: "up" | "down" | "flat" | "none";
 }
 
 const {
@@ -21,6 +28,9 @@ const {
   color = "var(--color-volume)",
   fillOpacity = 0.18,
   strokeWidth = 1.5,
+  showBaseline = false,
+  showMinMax = false,
+  trend,
 } = Astro.props;
 
 const safeVals = values.length > 0 ? values : [0];
@@ -28,6 +38,7 @@ const min = Math.min(...safeVals);
 const max = Math.max(...safeVals);
 const range = max - min || 1;
 const n = safeVals.length;
+const mean = safeVals.reduce((a, v) => a + v, 0) / n;
 
 function x(i: number) {
   if (n === 1) return width / 2;
@@ -40,13 +51,31 @@ function y(v: number) {
 
 let pathD = "";
 let areaD = "";
-if (mode === "line") {
+if (mode === "line" || mode === "area") {
   pathD = safeVals.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(2)} ${y(v).toFixed(2)}`).join(" ");
   areaD =
     `M0 ${height} ` +
     safeVals.map((v, i) => `L${x(i).toFixed(2)} ${y(v).toFixed(2)}`).join(" ") +
     ` L${width} ${height} Z`;
 }
+
+// Min/max indices (first occurrence).
+const minIdx = safeVals.indexOf(min);
+const maxIdx = safeVals.indexOf(max);
+
+// Derive trend from first vs last if caller didn't specify and values > 1.
+let resolvedTrend: "up" | "down" | "flat" | "none" = trend ?? "none";
+if (trend === undefined && safeVals.length > 1) {
+  const first = safeVals[0];
+  const last = safeVals[safeVals.length - 1];
+  if (last > first) resolvedTrend = "up";
+  else if (last < first) resolvedTrend = "down";
+  else resolvedTrend = "flat";
+}
+
+// Stable gradient id — no JS context, so hash the color+size to avoid
+// collisions when multiple sparklines share a page.
+const gradId = `sl-${color.replace(/[^a-z0-9]/gi, "")}-${width}-${height}`;
 ---
 
 <svg
@@ -58,42 +87,112 @@ if (mode === "line") {
   style={`max-width:${width}px;width:100%;height:${height}px`}
   aria-hidden="true"
 >
-  {
-    mode === "line" && (
-      <>
-        <path d={areaD} fill={color} fill-opacity={fillOpacity} />
-        <path
-          d={pathD}
-          fill="none"
-          stroke={color}
-          stroke-width={strokeWidth}
-          stroke-linecap="round"
-          stroke-linejoin="round"
+  {(mode === "line" || mode === "area") && (
+    <defs>
+      <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color={color} stop-opacity={Math.min(0.6, fillOpacity * 2)} />
+        <stop offset="100%" stop-color={color} stop-opacity={0} />
+      </linearGradient>
+    </defs>
+  )}
+
+  {showBaseline && (
+    <line
+      x1="0"
+      x2={width}
+      y1={y(mean).toFixed(2)}
+      y2={y(mean).toFixed(2)}
+      stroke={color}
+      stroke-width="0.5"
+      stroke-dasharray="1.5 2"
+      stroke-opacity="0.35"
+    />
+  )}
+
+  {mode === "line" && (
+    <>
+      <path d={areaD} fill={color} fill-opacity={fillOpacity} />
+      <path
+        d={pathD}
+        fill="none"
+        stroke={color}
+        stroke-width={strokeWidth}
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </>
+  )}
+
+  {mode === "area" && (
+    <>
+      <path d={areaD} fill={`url(#${gradId})`} />
+      <path
+        d={pathD}
+        fill="none"
+        stroke={color}
+        stroke-width={strokeWidth}
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </>
+  )}
+
+  {mode === "bars" &&
+    safeVals.map((v, i) => {
+      // Aim for a small, fixed-looking gap (~1 viewBox unit) regardless of
+      // count — 70% slots looked airy when stretched to card width.
+      const slot = width / n;
+      const gap = Math.min(1, slot * 0.15);
+      const barW = Math.max(0.5, slot - gap);
+      const barX = i * slot + gap / 2;
+      const h = ((v - min) / range) * (height - 2);
+      const barY = height - h - 1;
+      return (
+        <rect
+          x={barX.toFixed(2)}
+          y={barY.toFixed(2)}
+          width={barW.toFixed(2)}
+          height={Math.max(1, h).toFixed(2)}
+          fill={color}
+          rx="0.5"
         />
-      </>
-    )
-  }
-  {
-    mode === "bars" &&
-      safeVals.map((v, i) => {
-        // Aim for a small, fixed-looking gap (~1 viewBox unit) regardless of
-        // count — 70% slots looked airy when stretched to card width.
-        const slot = width / n;
-        const gap = Math.min(1, slot * 0.15);
-        const barW = Math.max(0.5, slot - gap);
-        const barX = i * slot + gap / 2;
-        const h = ((v - min) / range) * (height - 2);
-        const barY = height - h - 1;
-        return (
-          <rect
-            x={barX.toFixed(2)}
-            y={barY.toFixed(2)}
-            width={barW.toFixed(2)}
-            height={Math.max(1, h).toFixed(2)}
-            fill={color}
-            rx="0.5"
-          />
-        );
-      })
-  }
+      );
+    })}
+
+  {showMinMax && (mode === "line" || mode === "area") && safeVals.length > 1 && (
+    <>
+      <circle
+        cx={x(maxIdx).toFixed(2)}
+        cy={y(max).toFixed(2)}
+        r="1.75"
+        fill={color}
+      />
+      <circle
+        cx={x(minIdx).toFixed(2)}
+        cy={y(min).toFixed(2)}
+        r="1.5"
+        fill={color}
+        fill-opacity="0.5"
+      />
+    </>
+  )}
+
+  {resolvedTrend === "up" && (
+    <path
+      d={`M ${width - 7} 4 L ${width - 2} 4 L ${width - 2} 9`}
+      stroke={color}
+      stroke-width="1"
+      fill="none"
+      stroke-opacity="0.6"
+    />
+  )}
+  {resolvedTrend === "down" && (
+    <path
+      d={`M ${width - 7} 9 L ${width - 2} 9 L ${width - 2} 4`}
+      stroke={color}
+      stroke-width="1"
+      fill="none"
+      stroke-opacity="0.6"
+    />
+  )}
 </svg>

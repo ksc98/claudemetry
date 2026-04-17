@@ -1,7 +1,6 @@
 ---
-// Horizontal stacked bar + inline legend.
-// Segments with value 0 are dropped so they don't clutter the legend.
-
+// Stacked proportion bar with always-visible legend.
+// Astro-native (no React island) — renders server-side.
 interface Segment {
   label: string;
   value: number;
@@ -14,20 +13,37 @@ interface Props {
   segments: Segment[];
   /** Total to divide by. Defaults to sum of segment values. */
   total?: number;
-  /** Show the "label N%" legend under the bar. */
+  /** Show the "label N (pct%)" legend under the bar. */
   legend?: boolean;
   /** Bar height in px. */
   height?: number;
 }
 
-const { title, segments, total, legend = true, height = 8 } = Astro.props;
+const {
+  title,
+  segments,
+  total,
+  legend = true,
+  height = 8,
+} = Astro.props;
 
 const used = segments.filter((s) => s.value > 0);
 const denom = total ?? used.reduce((a, s) => a + s.value, 0);
-const pct = (s: Segment) => (denom > 0 ? (s.value / denom) * 100 : 0);
+const pct = (v: number) => (denom > 0 ? (v / denom) * 100 : 0);
+
+const ariaLabel = used
+  .map((s) => `${s.label} ${Math.round(pct(s.value))}%`)
+  .join(", ");
+
+function fmtCount(n: number): string {
+  return n.toLocaleString();
+}
+function fmtPct(p: number): string {
+  return `${p.toFixed(p < 10 ? 1 : 0)}%`;
+}
 ---
 
-<div>
+<div class="mixbar">
   {title && (
     <p class="text-[0.6875rem] uppercase tracking-[0.08em] text-[var(--color-muted-foreground)] font-medium mb-2">
       {title}
@@ -37,39 +53,65 @@ const pct = (s: Segment) => (denom > 0 ? (s.value / denom) * 100 : 0);
   {used.length === 0 ? (
     <div
       class="rounded-full bg-[var(--color-border)]"
-      style={`height:${height}px;`}
+      style={`height:${height}px`}
     />
   ) : (
     <div
-      class="flex overflow-hidden rounded-full bg-[var(--color-border)]"
-      style={`height:${height}px;`}
+      class="mixbar-track flex overflow-hidden rounded-full bg-[var(--color-border)]"
+      style={`height:${height}px`}
       role="img"
-      aria-label={used.map((s) => `${s.label} ${Math.round(pct(s))}%`).join(", ")}
+      aria-label={ariaLabel}
     >
-      {used.map((s) => (
-        <div
-          class="h-full"
-          style={`flex: ${Math.max(pct(s), 1)} 0 0; min-width:2px; background:${s.color};`}
-          title={`${s.label}: ${s.value.toLocaleString()} (${pct(s).toFixed(1)}%)`}
-        />
-      ))}
+      {used.map((s, i) => {
+        const p = pct(s.value);
+        return (
+          <div
+            class="mixbar-seg h-full"
+            style={`flex:${Math.max(p, 1)} 0 0;min-width:2px;background:${s.color};animation-delay:${i * 60}ms`}
+            title={`${s.label} · ${fmtCount(s.value)} (${fmtPct(p)})`}
+          />
+        );
+      })}
     </div>
   )}
 
   {legend && used.length > 0 && (
     <ul class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem] text-[var(--color-muted-foreground)]">
-      {used.map((s) => (
-        <li class="inline-flex items-center gap-1.5 tabular-nums">
-          <span
-            class="inline-block w-2 h-2 rounded-sm"
-            style={`background:${s.color};`}
-          />
-          <span class="text-[var(--color-foreground)]">{s.label}</span>
-          <span class="text-[var(--color-subtle-foreground)]">
-            {pct(s).toFixed(pct(s) < 10 ? 1 : 0)}%
-          </span>
-        </li>
-      ))}
+      {used.map((s) => {
+        const p = pct(s.value);
+        return (
+          <li class="inline-flex items-center gap-1.5 tabular-nums">
+            <span
+              class="inline-block w-2 h-2 rounded-sm"
+              style={`background:${s.color}`}
+            />
+            <span class="text-[var(--color-foreground)]">{s.label}</span>
+            <span class="text-[var(--color-subtle-foreground)]">
+              {fmtCount(s.value)}
+            </span>
+            <span class="text-[var(--color-subtle-foreground)]/70">
+              ({fmtPct(p)})
+            </span>
+          </li>
+        );
+      })}
     </ul>
   )}
 </div>
+
+<style>
+  .mixbar-track {
+    box-shadow: inset 0 0 0 1px var(--color-border);
+  }
+  .mixbar-seg {
+    transform-origin: left center;
+    animation: mixbar-seg-in 520ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  @keyframes mixbar-seg-in {
+    from { transform: scaleX(0); opacity: 0; }
+    to { transform: scaleX(1); opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .mixbar-seg { animation: none; }
+  }
+</style>
