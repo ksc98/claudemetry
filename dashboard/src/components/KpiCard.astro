@@ -123,7 +123,9 @@ const CardTag = href ? "a" : "div";
   <div class="relative">
     <p class={`font-mono text-3xl font-semibold tracking-tight tabular-nums ${valueClass}`}>
       {valueNum != null ? (
-        <KpiValue client:load num={valueNum} kind={valueKind} />
+        <KpiValue client:only="react" num={valueNum} kind={valueKind}>
+          <Fragment slot="fallback">{value}</Fragment>
+        </KpiValue>
       ) : (
         value
       )}
