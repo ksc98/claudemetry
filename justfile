@@ -13,7 +13,7 @@ setup-mise:
     rustup target add wasm32-unknown-unknown
     cargo install worker-build --locked
 
-# -------- claudemetry-api (Rust worker) --------
+# -------- burnage-api (Rust worker) --------
 
 local:
     npx --yes wrangler@latest dev --local --port 8787
@@ -27,12 +27,21 @@ build:
 login:
     npx --yes wrangler@latest login
 
-# Substitute __DOMAIN__ into wrangler.toml at deploy time, deploy from
-# the generated file, then drop it. Keeps the hostname out of source.
+# Expand __PROXY_ROUTES__ in wrangler.toml into one {/v1/*, /_cm/*} pair
+# per domain in $DOMAINS (space-separated; first = primary). Deploys from
+# the generated file, then drops it. Keeps hostnames out of source.
 deploy-api:
     #!/usr/bin/env bash
     set -euo pipefail
-    sed "s/__DOMAIN__/$DOMAIN/g" wrangler.toml > wrangler.deploy.toml
+    : "${DOMAINS:?set DOMAINS (space-separated list, first = primary) in .env}"
+    routes=""
+    for d in $DOMAINS; do
+        routes+="  { pattern = \"${d}/v1/*\", zone_name = \"${d}\" },"$'\n'
+        routes+="  { pattern = \"${d}/_cm/*\", zone_name = \"${d}\" },"$'\n'
+    done
+    routes="${routes%$'\n'}"
+    awk -v r="$routes" '$0 == "__PROXY_ROUTES__" { print r; next } { print }' \
+        wrangler.toml > wrangler.deploy.toml
     trap 'rm -f wrangler.deploy.toml' EXIT
     npx --yes wrangler@latest deploy -c wrangler.deploy.toml
 
@@ -42,23 +51,32 @@ tail:
 clean:
     rm -rf build target .wrangler
 
-# -------- claudemetry-frontend (Astro dashboard) --------
+# -------- burnage-frontend (Astro dashboard) --------
 
 dashboard-dev:
     cd dashboard && pnpm dev
 
 # Astro's CF adapter produces dist/server/wrangler.json at build time
-# with main/assets/bindings auto-filled. We sed __DOMAIN__ into that
-# generated file and deploy from it. Source wrangler.jsonc stays lean
-# so the vite-plugin doesn't try to resolve a nonexistent `main` during
-# the build phase.
+# with main/assets/bindings auto-filled. We rewrite its `.routes` array
+# via jq from $DOMAINS (one custom_domain entry per domain) and deploy
+# from it. Source wrangler.jsonc stays lean so the vite-plugin doesn't
+# try to resolve a nonexistent `main` during the build phase. The
+# primary domain (first in $DOMAINS) is passed as env.DOMAIN at runtime
+# so the dashboard can show the correct proxy URL.
 deploy-frontend:
     #!/usr/bin/env bash
     set -euo pipefail
+    : "${DOMAINS:?set DOMAINS (space-separated list, first = primary) in .env}"
+    primary="${DOMAINS%% *}"
     cd dashboard
     pnpm build
-    sed -i "s/__DOMAIN__/$DOMAIN/g" dist/server/wrangler.json
-    npx --yes wrangler@latest deploy -c dist/server/wrangler.json --var DOMAIN:"$DOMAIN"
+    routes_json=$(for d in $DOMAINS; do
+        printf '{"pattern":"%s","custom_domain":true}\n' "$d"
+    done | jq -s .)
+    jq --argjson routes "$routes_json" '.routes = $routes' \
+        dist/server/wrangler.json > dist/server/wrangler.deploy.json
+    mv dist/server/wrangler.deploy.json dist/server/wrangler.json
+    npx --yes wrangler@latest deploy -c dist/server/wrangler.json --var DOMAIN:"$primary"
 
 dashboard-tail:
     cd dashboard && npx --yes wrangler@latest tail --format pretty
@@ -90,14 +108,20 @@ vectorize-info:
 
 # -------- burnage (Rust CLI) --------
 
-# Install burnage to ~/.cargo/bin. Bakes https://$DOMAIN in as the default
-# proxy URL so the CLI works out of the box without --url.
+# Install burnage to ~/.cargo/bin. Bakes https://<primary-domain> in as
+# the default proxy URL (primary = first entry in $DOMAINS) so the CLI
+# works out of the box without --url.
 burnage-install:
-    BURNAGE_DEFAULT_URL="https://$DOMAIN" cargo install --path burnage --force
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${DOMAINS:?set DOMAINS (space-separated list, first = primary) in .env}"
+    primary="${DOMAINS%% *}"
+    BURNAGE_DEFAULT_URL="https://$primary" cargo install --path burnage --force
 
 # -------- Cloudflare Access --------
 
-# Idempotently provision / repair the Access apps and policies for $DOMAIN.
-# Needs CLOUDFLARE_API_TOKEN (Access: Apps and Policies Edit) + CLOUDFLARE_ACCOUNT_ID.
+# Idempotently provision / repair the Access apps and policies for every
+# domain in $DOMAINS. Needs CLOUDFLARE_API_TOKEN (Access: Apps and Policies
+# Edit) + CLOUDFLARE_ACCOUNT_ID.
 cf-access:
     ./scripts/cf-access.sh

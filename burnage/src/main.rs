@@ -22,7 +22,7 @@ const STYLES: Styles = Styles::styled()
 const DEFAULT_URL: Option<&str> = option_env!("BURNAGE_DEFAULT_URL");
 
 #[derive(Parser)]
-#[command(version, about = "Minimal CLI for claudemetry-api admin endpoints", styles = STYLES)]
+#[command(version, about = "Minimal CLI for burnage-api admin endpoints", styles = STYLES)]
 struct Cli {
     /// Proxy base URL (falls back to $ANTHROPIC_BASE_URL, then the baked-in default).
     #[arg(long, env = "ANTHROPIC_BASE_URL")]

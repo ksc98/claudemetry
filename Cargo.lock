@@ -125,6 +125,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "burnage-api"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "sha2",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "worker",
+ "worker-macros",
+]
+
+[[package]]
 name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -198,22 +214,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "claudemetry"
-version = "0.1.0"
-dependencies = [
- "hex",
- "js-sys",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "sha2",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "worker",
- "worker-macros",
-]
 
 [[package]]
 name = "colorchoice"

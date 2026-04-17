@@ -9,7 +9,7 @@ use worker::kv::KvStore;
 use worker::*;
 
 const UPSTREAM: &str = "https://api.anthropic.com";
-const DEFAULT_SALT: &str = "claudemetry-dev-unset";
+const DEFAULT_SALT: &str = "burnage-dev-unset";
 
 // ---------- Top-level fetch (proxy) ----------
 

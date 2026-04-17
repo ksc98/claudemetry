@@ -1,15 +1,14 @@
-name = "claudemetry-api"
+name = "burnage-api"
 main = "build/worker/shim.mjs"
 compatibility_date = "2025-01-01"
 workers_dev = false
 preview_urls = false
 
-# __DOMAIN__ is substituted at deploy time from $DOMAIN (see justfile)
-# so the public repo stays deployment-agnostic. The proxy takes /v1/*
-# and /_cm/*; the dashboard worker binds the rest of the hostname.
+# __PROXY_ROUTES__ is expanded at deploy time from $DOMAINS (space-separated,
+# see justfile) so the public repo stays deployment-agnostic. The proxy takes
+# /v1/* and /_cm/*; the dashboard worker binds the rest of each hostname.
 routes = [
-  { pattern = "__DOMAIN__/v1/*", zone_name = "__DOMAIN__" },
-  { pattern = "__DOMAIN__/_cm/*", zone_name = "__DOMAIN__" },
+__PROXY_ROUTES__
 ]
 
 # One Durable Object instance per user_hash. Each instance gets its own

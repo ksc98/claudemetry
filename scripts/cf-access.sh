@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Idempotently provisions all Cloudflare Access apps + policies for the
-# claudemetry dashboard. Safe to run repeatedly: existing apps/policies
-# with matching names are reused rather than duplicated.
+# burnage dashboard across every domain in $DOMAINS. Safe to run repeatedly:
+# existing apps (matched by .domain) are reused rather than duplicated.
 #
-# End state:
-#   $DOMAIN           → Allow, "allow-any-google" (any authenticated identity)
-#   $DOMAIN/v1/*      → Bypass, "bypass-everyone" (Claude Code API surface)
-#   $DOMAIN/_cm/*     → Bypass, "bypass-everyone" (curl admin probes)
+# End state (per domain D in $DOMAINS):
+#   D           → Allow, "allow-any-google" (any authenticated identity)
+#   D/v1/*      → Bypass, "bypass-everyone" (Claude Code API surface)
+#   D/_cm/*     → Bypass, "bypass-everyone" (curl admin probes)
 #
 # Usage:
 #   export CLOUDFLARE_API_TOKEN=<Access: Apps and Policies Edit scope>
@@ -25,7 +25,7 @@ fi
 
 : "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN (Access: Apps and Policies Edit scope)}"
 : "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID}"
-: "${DOMAIN:?set DOMAIN in .env or the environment}"
+: "${DOMAINS:?set DOMAINS (space-separated list) in .env or the environment}"
 
 API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/access"
 AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
@@ -84,17 +84,19 @@ ensure_policy() {
   echo "   + policy \"$name\" created"
 }
 
-echo "→ $DOMAIN (catch-all, Google-gated)"
-app_root=$(ensure_app "$DOMAIN" "$DOMAIN")
-ensure_policy "$app_root" "allow-any-google" "allow"
+for DOMAIN in $DOMAINS; do
+  echo "→ $DOMAIN (catch-all, Google-gated)"
+  app_root=$(ensure_app "$DOMAIN" "$DOMAIN")
+  ensure_policy "$app_root" "allow-any-google" "allow"
 
-echo "→ $DOMAIN/v1/* (bypass, Anthropic API)"
-app_v1=$(ensure_app "bypass /v1/*" "$DOMAIN/v1/*")
-ensure_policy "$app_v1" "bypass-everyone" "bypass"
+  echo "→ $DOMAIN/v1/* (bypass, Anthropic API)"
+  app_v1=$(ensure_app "bypass /v1/* ($DOMAIN)" "$DOMAIN/v1/*")
+  ensure_policy "$app_v1" "bypass-everyone" "bypass"
 
-echo "→ $DOMAIN/_cm/* (bypass, admin probes)"
-app_cm=$(ensure_app "bypass /_cm/*" "$DOMAIN/_cm/*")
-ensure_policy "$app_cm" "bypass-everyone" "bypass"
+  echo "→ $DOMAIN/_cm/* (bypass, admin probes)"
+  app_cm=$(ensure_app "bypass /_cm/* ($DOMAIN)" "$DOMAIN/_cm/*")
+  ensure_policy "$app_cm" "bypass-everyone" "bypass"
+done
 
 echo
 echo "Done. Refresh the dashboard in a browser to test the Google login flow."

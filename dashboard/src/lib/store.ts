@@ -1,4 +1,4 @@
-// Tiny client over the claudemetry-api UserStore Durable Object.
+// Tiny client over the burnage-api UserStore Durable Object.
 // Each user_hash = one DO instance = one private SQLite.
 
 export type TransactionRow = {

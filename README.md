@@ -1,4 +1,4 @@
-# claudemetry
+# burnage
 
 A Cloudflare Worker, written in Rust, that proxies requests to the Anthropic API and records a structured row for every transaction into a **per-user SQLite database** (Durable Object with native SQL storage). Point `ANTHROPIC_BASE_URL` at it and every Claude Code (or Anthropic SDK) request becomes queryable, per account, forever.
 
@@ -12,7 +12,7 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
          │ POST /v1/messages                              │ unchanged
          ▼                                                │
   ┌──────────────────────────────────────────────────────────┐
-  │  claudemetry-api (Rust Worker)                           │
+  │  burnage-api (Rust Worker)                               │
   │                                                          │
   │   identify    →  GET /oauth/profile   (KV cache, 1h TTL) │
   │                  user_hash = sha256(salt ‖ email)[:8]    │
@@ -98,7 +98,7 @@ just login         # one-time, opens browser
 just deploy-all    # both workers (or: just deploy-api / just deploy-frontend)
 ```
 
-By default the worker is reachable at `https://claudemetry-api.<your-subdomain>.workers.dev`. To use a custom domain, either uncomment the `routes` block in `wrangler.toml` (requires the zone to be on the same Cloudflare account) or bind the domain in the Cloudflare dashboard under Workers → claudemetry-api → Settings → Domains & Routes.
+By default the worker is reachable at `https://burnage-api.<your-subdomain>.workers.dev`. To use a custom domain, either uncomment the `routes` block in `wrangler.toml` (requires the zone to be on the same Cloudflare account) or bind the domain in the Cloudflare dashboard under Workers → burnage-api → Settings → Domains & Routes.
 
 Before sending traffic, generate and install a per-deployment salt so hashes aren't portable across deployments:
 
@@ -111,7 +111,7 @@ If unset, the worker falls back to a published dev salt and emits hashes that ar
 Both workers share a single KV namespace (binding name `SESSION`) for the OAuth-profile cache (`tok:<token_id>`) and the email→hash link (`link:<email>`). Create one and paste the id into both `wrangler.toml` and `dashboard/wrangler.jsonc`:
 
 ```bash
-npx wrangler kv namespace create claudemetry-session
+npx wrangler kv namespace create burnage-session
 # copy the id into the [[kv_namespaces]] block in both configs
 ```
 
@@ -292,7 +292,7 @@ These are bearer-gated and never cross identities unless you ask via `hash`.
 ## `burnage` CLI
 
 Thin cross-platform CLI over the `/_cm/*` endpoints, installed via
-`just burnage-install` (bakes your `$DOMAIN` in as the default `--url`).
+`just burnage-install` (bakes the primary entry from `$DOMAINS` in as the default `--url`).
 
 ```bash
 burnage whoami                # your stable user_hash + email
@@ -348,7 +348,7 @@ wrapping, since terminals already wrap and altering content would break
 
 ### `burnage quota`
 
-One combined view of your claudemetry deployment, zooming out:
+One combined view of your burnage deployment, zooming out:
 
 1. **Your DO** — turns, storage (vs the 5 GiB/DO cap), token totals, payload
    bytes, active window. Always shown; hits the proxy.
