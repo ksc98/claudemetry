@@ -97,6 +97,7 @@ export default function WsClient({
             rl_tok_remaining: null,
             rl_tok_limit: null,
             anthropic_message_id: null,
+            has_text: 0,
           };
           inFlight.set(virtual.tx_id, virtual);
           mergeAndPublish();

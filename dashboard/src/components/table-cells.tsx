@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, MessageSquareText, Sparkles } from "lucide-react";
 import type { TransactionRow } from "@/lib/store";
 import { useHydrated } from "@/hooks/use-hydrated";
 import {
@@ -95,6 +95,7 @@ export function ModelCell({ tx }: { tx: TransactionRow }) {
   const m = tx.model;
   const thought = (tx.thinking_blocks ?? 0) > 0;
   const budget = tx.thinking_budget ?? null;
+  const hasText = tx.has_text === 1;
   return (
     <span
       className={cn(
@@ -114,6 +115,18 @@ export function ModelCell({ tx }: { tx: TransactionRow }) {
               {budget >= 1000 ? `${Math.round(budget / 1000)}k` : budget}
             </span>
           )}
+        </span>
+      )}
+      {hasText && (
+        <span
+          className="inline-flex items-center text-[var(--color-muted-foreground)]"
+          title="assistant replied with text"
+        >
+          <MessageSquareText
+            size={10}
+            className="shrink-0"
+            aria-label="assistant replied with text"
+          />
         </span>
       )}
     </span>

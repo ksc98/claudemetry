@@ -1009,6 +1009,7 @@ impl UserStore {
                 "rl_tok_limit": r.rl_tok_limit,
                 "in_flight": 0,
                 "anthropic_message_id": r.anthropic_message_id,
+                "has_text": if r.assistant_text.as_deref().unwrap_or("").is_empty() { 0 } else { 1 },
             }
         }));
 
@@ -1112,6 +1113,9 @@ impl UserStore {
         let sql = self.state.storage().sql();
         // List-view columns only: excludes user_text / assistant_text
         // — those are fetched on demand via /turn for the detail view.
+        // `has_text` flags turns that produced a non-empty text content
+        // block (vs pure tool_use responses) so the dashboard can badge
+        // them without shipping the whole body.
         let cursor = sql.exec(
             "SELECT tx_id, ts, session_id, method, url, model, status, elapsed_ms,
                     input_tokens, output_tokens, cache_read, cache_creation,
@@ -1120,7 +1124,8 @@ impl UserStore {
                     thinking_budget, thinking_blocks, max_tokens,
                     rl_req_remaining, rl_req_limit,
                     rl_tok_remaining, rl_tok_limit,
-                    in_flight, anthropic_message_id
+                    in_flight, anthropic_message_id,
+                    CASE WHEN LENGTH(COALESCE(assistant_text,'')) > 0 THEN 1 ELSE 0 END AS has_text
              FROM transactions WHERE ts >= ? ORDER BY ts DESC",
             Some(vec![since.into()]),
         )?;
@@ -1215,7 +1220,8 @@ impl UserStore {
                     thinking_budget, thinking_blocks, max_tokens,
                     rl_req_remaining, rl_req_limit,
                     rl_tok_remaining, rl_tok_limit,
-                    in_flight, anthropic_message_id
+                    in_flight, anthropic_message_id,
+                    CASE WHEN LENGTH(COALESCE(assistant_text,'')) > 0 THEN 1 ELSE 0 END AS has_text
              FROM transactions
              WHERE session_id = ? ORDER BY ts DESC LIMIT ?",
             Some(vec![id.into(), limit.into()]),

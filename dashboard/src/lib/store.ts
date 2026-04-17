@@ -43,6 +43,10 @@ export type TransactionRow = {
   user_text?: string | null;
   /** Only present on /turn (detail fetch); list endpoints omit it. */
   assistant_text?: string | null;
+  /** 1 if the response produced a non-empty `text` content block (vs pure
+   * tool_use). Set on list endpoints and WS turn_complete so the table can
+   * flag turns that actually replied without shipping the body. */
+  has_text?: number | null;
 };
 
 export type Stats = {
