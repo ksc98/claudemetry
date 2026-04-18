@@ -2,20 +2,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { TransactionRow } from "@/lib/store";
 import { estimateCostUsd } from "@/lib/format";
 import { subscribeRows } from "@/lib/rowsBus";
-import type { Window } from "@/lib/pillWindow";
+import {
+  DEFAULT_WINDOW,
+  windowIsBucketed,
+  windowIsShort,
+  type Window,
+} from "@/lib/pillWindow";
 import { useHydrated } from "@/hooks/use-hydrated";
 import TokenAreaChart, { type TokenAreaPoint } from "./charts/TokenAreaChart";
 
 type Point = TokenAreaPoint & { ts: number };
 
 // Bucket sizes per window. Tokens are averaged per turn; cost is summed.
-const BUCKET_MS: Record<Window, number> = {
-  "15m": 0, // individual turns
-  "1h": 0,
-  "24h": 0, // individual turns
-  "3d": 5 * 60_000, // 5 min → ~864 buckets
-  "7d": 5 * 60_000, // 5 min → ~2016 buckets
-};
+// Only long windows (> 24h) bucket — shorter windows render individual turns.
+function bucketMsFor(win: Window): number {
+  return windowIsBucketed(win) ? 5 * 60_000 : 0;
+}
 
 function rowsToPoints(rows: TransactionRow[], win: Window): Point[] {
   const filtered = [...rows]
@@ -24,7 +26,7 @@ function rowsToPoints(rows: TransactionRow[], win: Window): Point[] {
 
   if (filtered.length === 0) return [];
 
-  const bucketMs = BUCKET_MS[win];
+  const bucketMs = bucketMsFor(win);
 
   // Zero → null so the chart draws a gap at that point instead of a line
   // hugging the baseline. Honest representation of "no data for this
@@ -95,7 +97,7 @@ function fmtTs(ms: number, win: Window): string {
   const d = new Date(ms);
   const h = String(d.getHours()).padStart(2, "0");
   const m = String(d.getMinutes()).padStart(2, "0");
-  if (win === "15m" || win === "1h") return `${h}:${m}`;
+  if (windowIsShort(win)) return `${h}:${m}`;
   // Longer windows: show date
   const mon = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
@@ -104,7 +106,7 @@ function fmtTs(ms: number, win: Window): string {
 
 export default function TokenChart({
   initialRows,
-  window: win = "1h",
+  window: win = DEFAULT_WINDOW,
 }: {
   initialRows: TransactionRow[];
   window?: Window;
@@ -128,9 +130,9 @@ export default function TokenChart({
   const data = useMemo(() => rowsToPoints(rows, win), [rows, win]);
 
   // Enable the brush on wide windows where point counts are high and
-  // scrubbing becomes useful. 3d/7d use 5-min buckets but still produce
-  // hundreds of points.
-  const showBrush = win === "3d" || win === "7d";
+  // scrubbing becomes useful. Bucketed windows still produce hundreds of
+  // points even after bucketing, so the brush is worthwhile there.
+  const showBrush = windowIsBucketed(win);
 
   // fmtTs uses the user's local timezone (Date.prototype.getHours), but
   // Cloudflare Workers SSR runs in UTC. Rendering the chart on SSR would

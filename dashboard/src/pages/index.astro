@@ -22,7 +22,7 @@ import {
   type SessionModelBucket,
 } from "@/lib/store";
 import { buildSessionListFromSummary } from "@/lib/sessions";
-import { parseWindow, windowSince } from "@/lib/pillWindow";
+import { parseWindow, windowIsBucketed, windowSince } from "@/lib/pillWindow";
 import { estimateCostUsd, fmtInt } from "@/lib/format";
 
 const domain = env.DOMAIN ?? "your-proxy";
@@ -39,7 +39,7 @@ const userHash = linked ?? cookieHash;
 
 const ns = env.USER_STORE;
 
-// Pill window (default 1h) — controls the "Tokens & cost over time" chart only.
+// Pill window (default 3h) — controls the "Tokens & cost over time" chart only.
 // KPI cards always show all-time aggregates.
 const win = parseWindow(Astro.url.searchParams);
 const sinceMs = windowSince(win);
@@ -205,7 +205,7 @@ const totalSessions = stats?.sessions ?? 0;
           </div>
         </div>
         <p class="text-xs text-[var(--color-subtle-foreground)] mb-4">
-          Token composition with cost overlay. {chartData.length} turns across {win} window{["24h", "3d", "7d"].includes(win) ? " · avg per turn" : ""}.
+          Token composition with cost overlay. {chartData.length} turns across {win} window{windowIsBucketed(win) ? " · avg per turn" : ""}.
         </p>
         <TokenChart client:load initialRows={rows} window={win} />
       </section>
