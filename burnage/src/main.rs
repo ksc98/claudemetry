@@ -71,6 +71,10 @@ struct BackfillArgs {
     /// latency. Clamped server-side to [1, 200].
     #[arg(long, default_value_t = 50)]
     batch_size: i64,
+    /// Resume from a specific timestamp (epoch ms). Only processes rows
+    /// older than this value — use to skip already-backfilled data.
+    #[arg(long)]
+    before_ts: Option<i64>,
 }
 
 #[derive(clap::Args)]
@@ -219,6 +223,7 @@ fn main() -> Result<()> {
                 base,
                 token,
                 batch_size: args.batch_size,
+                before_ts: args.before_ts,
             });
         }
         Cmd::Whoami => (Method::Get, "/_cm/whoami"),

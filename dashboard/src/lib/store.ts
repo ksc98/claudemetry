@@ -47,6 +47,10 @@ export type TransactionRow = {
    * tool_use). Set on list endpoints and WS turn_complete so the table can
    * flag turns that actually replied without shipping the body. */
   has_text?: number | null;
+  /** Full thinking content from thinking_delta SSE events. Detail-fetch only. */
+  thinking_text?: string | null;
+  /** JSON array of {name, id, input} for each tool call. Detail-fetch only. */
+  tool_calls_json?: string | null;
 };
 
 export type Stats = {

@@ -13,7 +13,7 @@ import { cn } from "@/lib/cn";
 const turnDetailCache = new Map<string, TransactionRow>();
 
 function hasDetail(tx: TransactionRow): boolean {
-  return tx.user_text != null || tx.assistant_text != null;
+  return tx.user_text != null || tx.assistant_text != null || tx.thinking_text != null || tx.tools_json != null;
 }
 
 export function TurnDetail({ tx: initial }: { tx: TransactionRow }) {
@@ -72,7 +72,7 @@ export function TurnDetail({ tx: initial }: { tx: TransactionRow }) {
   );
 
   const tools: string[] = tx.tools_json ? JSON.parse(tx.tools_json) : [];
-  const hasConversation = !!(tx.user_text || tx.assistant_text);
+  const hasConversation = !!(tx.user_text || tx.thinking_text || tx.assistant_text);
   return (
     <div className="flex flex-col gap-4">
       <div className="flex justify-end">
@@ -101,6 +101,9 @@ export function TurnDetail({ tx: initial }: { tx: TransactionRow }) {
         <div className="flex flex-col gap-3">
           {tx.user_text ? (
             <ConversationBlock role="you" text={tx.user_text} />
+          ) : null}
+          {tx.thinking_text ? (
+            <ConversationBlock role="thinking" text={tx.thinking_text} />
           ) : null}
           {tx.assistant_text ? (
             <ConversationBlock role="assistant" text={tx.assistant_text} />
@@ -248,7 +251,7 @@ function ConversationBlock({
   role,
   text,
 }: {
-  role: "you" | "assistant";
+  role: "you" | "assistant" | "thinking";
   text: string;
 }) {
   const [expanded, setExpanded] = React.useState(false);
@@ -262,7 +265,9 @@ function ConversationBlock({
             "text-[0.6875rem] uppercase tracking-[0.08em] font-mono",
             role === "you"
               ? "text-sky-400/80"
-              : "text-amber-400/80",
+              : role === "thinking"
+                ? "text-[var(--color-chart-4)]"
+                : "text-amber-400/80",
           )}
         >
           {role}{" "}

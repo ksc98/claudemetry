@@ -12,6 +12,7 @@ pub struct BackfillOpts {
     pub base: String,
     pub token: String,
     pub batch_size: i64,
+    pub before_ts: Option<i64>,
 }
 
 pub fn run(opts: BackfillOpts) -> Result<()> {
@@ -21,7 +22,7 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
     );
     let auth = format!("Bearer {}", opts.token);
 
-    let mut before_ts: Option<i64> = None;
+    let mut before_ts: Option<i64> = opts.before_ts;
     let mut totals = Totals::default();
     let mut page = 0i64;
     let mut total_rows: i64 = 0;
