@@ -21,10 +21,11 @@ const NumberFlowLazy = lazy(() => import("@number-flow/react"));
 // Sensible starting pick when the user scrolls on an inactive unit.
 const UNIT_DEFAULT: Record<Unit, number> = { m: 15, h: 3, d: 1 };
 
-// One "tick" of value change per this many pixels of wheel scroll. Trackpad
-// scrolls fire continuously with small deltas — without accumulation the
-// value flies past the target before the user can react.
-const SCROLL_PX_PER_TICK = 60;
+// Min gap between ticks. Smooth-scroll mice / trackpads fire ~10+ wheel
+// events per notch; without throttling, each notch jumps by 5+. With
+// this, the value moves at most ~20/sec — fast enough to feel
+// responsive while staying granular.
+const MIN_MS_PER_TICK = 50;
 
 export default function TimeWindowPill() {
   const [win, setWin] = React.useState<Window>(DEFAULT_WINDOW);
@@ -79,7 +80,7 @@ function UnitSegment({
 }) {
   const [preview, setPreview] = React.useState<number | null>(null);
   const buttonRef = React.useRef<HTMLButtonElement | null>(null);
-  const accumRef = React.useRef(0);
+  const lastTickRef = React.useRef(0);
   const max = UNIT_MAX[unit];
 
   // Wheel handler is attached imperatively because React's onWheel is
@@ -90,13 +91,14 @@ function UnitSegment({
     if (!el) return;
     const handler = (e: WheelEvent) => {
       e.preventDefault();
-      accumRef.current += e.deltaY;
-      const ticks = Math.trunc(accumRef.current / SCROLL_PX_PER_TICK);
-      if (ticks === 0) return;
-      accumRef.current -= ticks * SCROLL_PX_PER_TICK;
+      if (e.deltaY === 0) return;
+      const now = performance.now();
+      if (now - lastTickRef.current < MIN_MS_PER_TICK) return;
+      lastTickRef.current = now;
+      const delta = e.deltaY > 0 ? 1 : -1;
       setPreview((prev) => {
         const start = prev ?? (active ? activeValue : UNIT_DEFAULT[unit]);
-        const next = Math.min(Math.max(start + ticks, 1), max);
+        const next = Math.min(Math.max(start + delta, 1), max);
         return next === start ? prev : next;
       });
     };
@@ -105,13 +107,13 @@ function UnitSegment({
   }, [active, activeValue, max, unit]);
 
   const handleMouseLeave = () => {
-    accumRef.current = 0;
+    lastTickRef.current = 0;
     setPreview(null);
   };
 
   const handleClick = () => {
     onCommit(preview ?? (active ? activeValue : UNIT_DEFAULT[unit]));
-    accumRef.current = 0;
+    lastTickRef.current = 0;
     setPreview(null);
   };
 
