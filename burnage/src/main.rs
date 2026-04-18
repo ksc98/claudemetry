@@ -67,11 +67,21 @@ enum Cmd {
 
 #[derive(clap::Args)]
 struct BackfillArgs {
-    /// Rows per DO call. Server runs embeds in parallel (cap 16) within the
-    /// batch, so per-call wall-time is roughly constant across small-to-mid
-    /// batch sizes. Clamped server-side to [1, 200].
+    /// Rows per DO call. Server runs embeds in parallel (see
+    /// --embed-concurrency) within the batch, so per-call wall-time is
+    /// roughly constant across small-to-mid batch sizes.
+    /// Clamped server-side to [1, 200].
     #[arg(long, default_value_t = 100)]
     batch_size: i64,
+    /// Concurrent in-flight Workers AI calls per batch. 1 = serial.
+    /// Higher = faster wall time but risks AI-gateway 429s. Server
+    /// clamps to [1, 64]; omit to use the server default (16).
+    #[arg(long)]
+    embed_concurrency: Option<usize>,
+    /// Stop after N batches. Useful for benchmarking batch_size ×
+    /// embed_concurrency combos without running the whole backfill.
+    #[arg(long)]
+    max_batches: Option<i64>,
     /// Resume from a specific timestamp (epoch ms). Only processes rows
     /// older than this value — use to skip already-backfilled data.
     #[arg(long)]
@@ -225,6 +235,8 @@ fn main() -> Result<()> {
                 token,
                 batch_size: args.batch_size,
                 before_ts: args.before_ts,
+                embed_concurrency: args.embed_concurrency,
+                max_batches: args.max_batches,
             });
         }
         Cmd::Whoami => (Method::Get, "/_cm/whoami"),

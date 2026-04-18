@@ -1439,6 +1439,8 @@ impl UserStore {
             batch_size: Option<i64>,
             #[serde(default)]
             before_ts: Option<i64>,
+            #[serde(default)]
+            embed_concurrency: Option<usize>,
         }
         let b: Body = match req.json().await {
             Ok(b) => b,
@@ -1450,6 +1452,7 @@ impl UserStore {
         let user_hash = b.user_hash;
         let batch_size = b.batch_size.unwrap_or(50).clamp(1, 200);
         let before_ts = b.before_ts.unwrap_or(i64::MAX);
+        let embed_concurrency = b.embed_concurrency.unwrap_or(16).clamp(1, 64);
 
         let sql = self.state.storage().sql();
         let cursor = sql.exec(
@@ -1557,7 +1560,6 @@ impl UserStore {
 
         // Parallel embed with concurrency cap.
         use futures_util::StreamExt;
-        const EMBED_CONCURRENCY: usize = 16;
         let env_ref = &self.env;
         let embed_results: Vec<(PreEmbed, Option<Vec<f32>>, i64)> =
             futures_util::stream::iter(to_embed.into_iter().map(|pe| async move {
@@ -1566,7 +1568,7 @@ impl UserStore {
                 let embed_ms = Date::now().as_millis() as i64 - start;
                 (pe, result, embed_ms)
             }))
-            .buffer_unordered(EMBED_CONCURRENCY)
+            .buffer_unordered(embed_concurrency)
             .collect()
             .await;
 

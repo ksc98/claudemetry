@@ -13,6 +13,8 @@ pub struct BackfillOpts {
     pub token: String,
     pub batch_size: i64,
     pub before_ts: Option<i64>,
+    pub embed_concurrency: Option<usize>,
+    pub max_batches: Option<i64>,
 }
 
 pub fn run(opts: BackfillOpts) -> Result<()> {
@@ -34,6 +36,9 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
         let mut body = serde_json::json!({ "batch_size": opts.batch_size });
         if let Some(ts) = before_ts {
             body["before_ts"] = serde_json::json!(ts);
+        }
+        if let Some(c) = opts.embed_concurrency {
+            body["embed_concurrency"] = serde_json::json!(c);
         }
 
         // Pre-flight line (no newline, flushed) so the user sees that we're
@@ -157,6 +162,16 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
 
         if done {
             break;
+        }
+        if let Some(max) = opts.max_batches {
+            if page >= max {
+                println!(
+                    "  {} stopping after {} batches (--max-batches)",
+                    "→".dark_grey(),
+                    page,
+                );
+                break;
+            }
         }
         let next = v
             .get("next_before_ts")
