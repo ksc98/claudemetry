@@ -1484,9 +1484,12 @@ impl UserStore {
         let mut oldest_ts = before_ts;
         let mut processed: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
 
-        // Phase 1: sequential embeds. Workers AI is fast (~50ms per call), but
-        // running in parallel risks rate-limit errors we'd then have to retry.
-        // The real cost savings come from phase 2.
+        // Phase 1: embed all rows in parallel with bounded concurrency.
+        // Workers AI rate limits on the AI gateway sit well above 16 concurrent
+        // requests per model, so we cap concurrency at 16 — high enough to
+        // dominate the batch wall-clock time (embed phase drops from
+        // ~N×50–200ms to ~1×50–200ms per batch), low enough to stay clear of
+        // 429s. A single bulk upsert lands in phase 2.
         struct Pending {
             tx_id: String,
             session_id: Option<String>,
@@ -1495,8 +1498,18 @@ impl UserStore {
             embed_ms: i64,
             values: Vec<f32>,
         }
-        let mut pending: Vec<Pending> = Vec::with_capacity(rows.len());
+        struct PreEmbed {
+            tx_id: String,
+            session_id: Option<String>,
+            ts: i64,
+            text_len: i64,
+            combined: String,
+        }
 
+        // Sync pre-pass: compute oldest_ts, split skipped_empty rows from
+        // those that need embedding. Avoids paying parallel overhead for
+        // rows we'd drop anyway.
+        let mut to_embed: Vec<PreEmbed> = Vec::with_capacity(rows.len());
         for row in &rows {
             let tx_id = row
                 .get("tx_id")
@@ -1533,25 +1546,48 @@ impl UserStore {
                 }));
                 continue;
             }
-            let embed_start = Date::now().as_millis() as i64;
-            let embed_result = embed_text(&self.env, &combined).await;
-            let embed_ms = Date::now().as_millis() as i64 - embed_start;
-            match embed_result {
+            to_embed.push(PreEmbed {
+                tx_id,
+                session_id,
+                ts,
+                text_len,
+                combined,
+            });
+        }
+
+        // Parallel embed with concurrency cap.
+        use futures_util::StreamExt;
+        const EMBED_CONCURRENCY: usize = 16;
+        let env_ref = &self.env;
+        let embed_results: Vec<(PreEmbed, Option<Vec<f32>>, i64)> =
+            futures_util::stream::iter(to_embed.into_iter().map(|pe| async move {
+                let start = Date::now().as_millis() as i64;
+                let result = embed_text(env_ref, &pe.combined).await;
+                let embed_ms = Date::now().as_millis() as i64 - start;
+                (pe, result, embed_ms)
+            }))
+            .buffer_unordered(EMBED_CONCURRENCY)
+            .collect()
+            .await;
+
+        let mut pending: Vec<Pending> = Vec::with_capacity(embed_results.len());
+        for (pe, result, embed_ms) in embed_results {
+            match result {
                 Some(values) => pending.push(Pending {
-                    tx_id,
-                    session_id,
-                    ts,
-                    text_len,
+                    tx_id: pe.tx_id,
+                    session_id: pe.session_id,
+                    ts: pe.ts,
+                    text_len: pe.text_len,
                     embed_ms,
                     values,
                 }),
                 None => {
                     embed_errors += 1;
                     processed.push(json!({
-                        "tx_id": tx_id,
-                        "ts": ts,
+                        "tx_id": pe.tx_id,
+                        "ts": pe.ts,
                         "status": "embed_err",
-                        "text_len": text_len,
+                        "text_len": pe.text_len,
                         "embed_ms": embed_ms,
                     }));
                 }

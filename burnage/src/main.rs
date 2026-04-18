@@ -67,9 +67,10 @@ enum Cmd {
 
 #[derive(clap::Args)]
 struct BackfillArgs {
-    /// Rows per DO call. Larger = fewer round-trips but longer per-call
-    /// latency. Clamped server-side to [1, 200].
-    #[arg(long, default_value_t = 50)]
+    /// Rows per DO call. Server runs embeds in parallel (cap 16) within the
+    /// batch, so per-call wall-time is roughly constant across small-to-mid
+    /// batch sizes. Clamped server-side to [1, 200].
+    #[arg(long, default_value_t = 100)]
     batch_size: i64,
     /// Resume from a specific timestamp (epoch ms). Only processes rows
     /// older than this value — use to skip already-backfilled data.
