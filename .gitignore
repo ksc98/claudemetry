@@ -19,5 +19,6 @@ dashboard/wrangler.deploy.jsonc
 dashboard/dist/
 dashboard/.astro/
 
-# Local agent state (Claude Code worktrees, settings, etc.)
-.claude/
+# Local agent state — keep skills/commands tracked; ignore personal bits.
+.claude/settings.local.json
+.claude/worktrees/
