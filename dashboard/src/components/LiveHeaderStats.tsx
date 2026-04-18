@@ -3,7 +3,7 @@ import { DollarSign, Flame, MessageSquare, Layers, AlertTriangle, Gauge } from "
 import type { Stats, TransactionRow } from "@/lib/store";
 import type { SessionSummary } from "@/lib/sessions";
 import { estimateCostUsd } from "@/lib/format";
-import { seedStats, subscribeStats } from "@/lib/statsBus";
+import { subscribeStats } from "@/lib/statsBus";
 import { subscribeRows } from "@/lib/rowsBus";
 import { subscribeSessions } from "@/lib/sessionsBus";
 
@@ -83,22 +83,8 @@ export default function LiveHeaderStats({
 
   useEffect(() => {
     if (!live) return;
-    seedStats({
-      turns: initialStats.turns,
-      sessions: initialStats.sessions,
-      estimated_cost_usd: initialStats.spendUsd,
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read: 0,
-      cache_creation: 0,
-      first_ts: null,
-      last_ts: null,
-      total_elapsed_ms: 0,
-      cache_creation_5m: 0,
-      cache_creation_1h: 0,
-    });
     return subscribeStats(setStats);
-  }, [live, initialStats.spendUsd, initialStats.sessions, initialStats.turns]);
+  }, [live]);
 
   useEffect(() => {
     if (!live) return;
