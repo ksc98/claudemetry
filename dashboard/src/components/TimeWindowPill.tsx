@@ -12,8 +12,13 @@ import {
 } from "@/lib/pillWindow";
 import { cn } from "@/lib/cn";
 
-// Sensible starting pick when the user hovers an inactive unit.
+// Sensible starting pick when the user scrolls on an inactive unit.
 const UNIT_DEFAULT: Record<Unit, number> = { m: 15, h: 3, d: 1 };
+
+// One "tick" of value change per this many pixels of wheel scroll. Trackpad
+// scrolls fire continuously with small deltas — without accumulation the
+// value flies past the target before the user can react.
+const SCROLL_PX_PER_TICK = 60;
 
 export default function TimeWindowPill() {
   const [win, setWin] = React.useState<Window>(DEFAULT_WINDOW);
@@ -48,7 +53,6 @@ export default function TimeWindowPill() {
           unit={u}
           active={u === activeU}
           activeValue={activeN}
-          startValue={u === activeU ? activeN : UNIT_DEFAULT[u]}
           onCommit={(n) => commit(u, n)}
         />
       ))}
@@ -60,180 +64,75 @@ function UnitSegment({
   unit,
   active,
   activeValue,
-  startValue,
   onCommit,
 }: {
   unit: Unit;
   active: boolean;
   activeValue: number;
-  startValue: number;
   onCommit: (n: number) => void;
 }) {
-  const [open, setOpen] = React.useState(false);
-  const [preview, setPreview] = React.useState(startValue);
-  const closeTimer = React.useRef<number | undefined>(undefined);
-
-  // Reset preview each time the popover opens so it starts from the
-  // current-value-for-this-unit or the unit's default.
-  React.useEffect(() => {
-    if (open) setPreview(startValue);
-  }, [open, startValue]);
-
-  const clearClose = () => {
-    if (closeTimer.current != null) {
-      window.clearTimeout(closeTimer.current);
-      closeTimer.current = undefined;
-    }
-  };
-
-  const scheduleClose = () => {
-    clearClose();
-    closeTimer.current = window.setTimeout(() => setOpen(false), 120);
-  };
-
-  React.useEffect(() => () => clearClose(), []);
-
-  const label = active ? `${activeValue}${unit}` : unit;
-
-  return (
-    <div
-      className="relative"
-      onMouseEnter={() => {
-        clearClose();
-        setOpen(true);
-      }}
-      onMouseLeave={scheduleClose}
-    >
-      <button
-        type="button"
-        role="tab"
-        aria-selected={active}
-        className={cn(
-          "flex h-full min-w-[2.25rem] items-center justify-center rounded-full px-3 text-xs font-medium tabular-nums transition-colors",
-          active
-            ? "bg-[var(--color-volume-muted)] text-[var(--color-foreground)] shadow-[inset_0_0_0_1px_var(--color-border-strong)]"
-            : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
-        )}
-      >
-        {label}
-      </button>
-
-      {open && (
-        <UnitScrubber
-          unit={unit}
-          value={preview}
-          onPreview={setPreview}
-          onCommit={(n) => {
-            onCommit(n);
-            setOpen(false);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-const ITEM_H = 28;
-const ROWS_VISIBLE = 5;
-
-function UnitScrubber({
-  unit,
-  value,
-  onPreview,
-  onCommit,
-}: {
-  unit: Unit;
-  value: number;
-  onPreview: (n: number) => void;
-  onCommit: (n: number) => void;
-}) {
-  const scrollRef = React.useRef<HTMLDivElement | null>(null);
-  const suppressScrollRef = React.useRef(false);
-
+  const [preview, setPreview] = React.useState<number | null>(null);
+  const buttonRef = React.useRef<HTMLButtonElement | null>(null);
+  const accumRef = React.useRef(0);
   const max = UNIT_MAX[unit];
-  const values = React.useMemo(
-    () => Array.from({ length: max }, (_, i) => i + 1),
-    [max],
-  );
 
-  const pad = ROWS_VISIBLE * ITEM_H / 2 - ITEM_H / 2;
-  const emptyTop = Math.max(0, pad - (value - 1) * ITEM_H);
-  const emptyBottom = Math.max(0, pad - (max - value) * ITEM_H);
-  const cardHeight = ROWS_VISIBLE * ITEM_H - emptyTop - emptyBottom;
-
-  // Initial centering — runs once when the popover mounts.
+  // Wheel handler is attached imperatively because React's onWheel is
+  // passive — preventDefault wouldn't stop the page from scrolling
+  // alongside the value change.
   React.useEffect(() => {
-    const el = scrollRef.current;
+    const el = buttonRef.current;
     if (!el) return;
-    suppressScrollRef.current = true;
-    el.scrollTo({ top: (value - 1) * ITEM_H, behavior: "auto" });
-    // Release the suppression after the scroll settles.
-    const id = window.setTimeout(() => {
-      suppressScrollRef.current = false;
-    }, 50);
-    return () => window.clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      accumRef.current += e.deltaY;
+      const ticks = Math.trunc(accumRef.current / SCROLL_PX_PER_TICK);
+      if (ticks === 0) return;
+      accumRef.current -= ticks * SCROLL_PX_PER_TICK;
+      setPreview((prev) => {
+        const start = prev ?? (active ? activeValue : UNIT_DEFAULT[unit]);
+        const next = Math.min(Math.max(start + ticks, 1), max);
+        return next === start ? prev : next;
+      });
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, [active, activeValue, max, unit]);
 
-  const handleScroll = () => {
-    if (suppressScrollRef.current) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    const idx = Math.round(el.scrollTop / ITEM_H);
-    const next = Math.min(Math.max(idx + 1, 1), max);
-    if (next !== value) onPreview(next);
+  const handleMouseLeave = () => {
+    accumRef.current = 0;
+    setPreview(null);
   };
 
+  const handleClick = () => {
+    onCommit(preview ?? (active ? activeValue : UNIT_DEFAULT[unit]));
+    accumRef.current = 0;
+    setPreview(null);
+  };
+
+  // While previewing, the segment shows its candidate value and lights up
+  // alongside the (still-active) current selection so the user can see
+  // both "what's set" and "what would be picked on click".
+  const showValue = preview !== null || active;
+  const valueToShow = preview ?? activeValue;
+  const label = showValue ? `${valueToShow}${unit}` : unit;
+  const isHighlighted = active || preview !== null;
+
   return (
-    <div
-      className="absolute left-1/2 z-50 -translate-x-1/2"
-      style={{
-        top: `calc(50% - ${pad + ITEM_H / 2 - emptyTop}px)`,
-      }}
-      role="presentation"
+    <button
+      ref={buttonRef}
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onMouseLeave={handleMouseLeave}
+      onClick={handleClick}
+      className={cn(
+        "flex h-full min-w-[2.25rem] items-center justify-center rounded-full px-3 text-xs font-medium tabular-nums transition-colors",
+        isHighlighted
+          ? "bg-[var(--color-volume-muted)] text-[var(--color-foreground)] shadow-[inset_0_0_0_1px_var(--color-border-strong)]"
+          : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
+      )}
     >
-      <div
-        className="overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] shadow-lg"
-        style={{ height: cardHeight }}
-      >
-        <div style={{ marginTop: -emptyTop }}>
-          <div className="relative" style={{ height: ROWS_VISIBLE * ITEM_H }}>
-            <div
-              className="pointer-events-none absolute inset-x-1 top-1/2 -translate-y-1/2 rounded-md border border-[var(--color-border-strong)] bg-[var(--color-volume-muted)]"
-              style={{ height: ITEM_H }}
-              aria-hidden="true"
-            />
-            <div
-              ref={scrollRef}
-              onScroll={handleScroll}
-              className="relative w-16 snap-y snap-mandatory overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-              style={{
-                height: ROWS_VISIBLE * ITEM_H,
-                paddingTop: pad,
-                paddingBottom: pad,
-              }}
-            >
-              {values.map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  onClick={() => onCommit(n)}
-                  className={cn(
-                    "flex w-full snap-center items-center justify-center text-xs tabular-nums transition-colors",
-                    n === value
-                      ? "font-medium text-[var(--color-foreground)]"
-                      : "text-[var(--color-muted-foreground)] hover:text-[var(--color-foreground)]",
-                  )}
-                  style={{ height: ITEM_H }}
-                >
-                  {n}
-                  {unit}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+      {label}
+    </button>
   );
 }
