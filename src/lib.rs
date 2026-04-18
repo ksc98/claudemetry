@@ -1468,25 +1468,26 @@ impl UserStore {
         };
 
         let scanned = rows.len() as i64;
-        let mut skipped_empty = 0i64;
-        let mut embed_errors = 0i64;
-        let mut oldest_ts = before_ts;
-        let mut processed: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
 
-        // Phase 1: embed all rows in parallel with bounded concurrency.
-        // Workers AI rate limits on the AI gateway sit well above 16 concurrent
-        // requests per model, so we cap concurrency at 16 — high enough to
-        // dominate the batch wall-clock time (embed phase drops from
-        // ~N×50–200ms to ~1×50–200ms per batch), low enough to stay clear of
-        // 429s. A single bulk upsert lands in phase 2.
-        struct Pending {
-            tx_id: String,
-            session_id: Option<String>,
-            ts: i64,
-            text_len: i64,
-            embed_ms: i64,
-            values: Vec<f32>,
-        }
+        // NDJSON streaming response. The handler returns immediately with a
+        // receiver stream as the body; the actual work runs on a spawned
+        // task that writes one JSON line per event as it happens. Live
+        // feedback at the CLI without waiting for the whole batch to finish.
+        //
+        // Event shapes:
+        //   {"type":"row","tx_id":..,"ts":..,"status":"skipped_empty","text_len":..}
+        //   {"type":"row","tx_id":..,"ts":..,"status":"embed_ok","text_len":..,"embed_ms":..}
+        //   {"type":"row","tx_id":..,"ts":..,"status":"embed_err","text_len":..,"embed_ms":..}
+        //   {"type":"end","scanned":..,"upserted":..,"skipped_empty":..,"embed_errors":..,
+        //    "upsert_errors":..,"upsert_err":Option<str>,"oldest_ts":..,"next_before_ts":..,
+        //    "done":..,"total_rows":..,"batch_upsert_ms":..}
+        //
+        // Bulk upsert is all-or-nothing (Vectorize semantics), so we don't
+        // emit per-row upsert events — the `end` event's upsert_errors +
+        // upsert_err fields cover it.
+        let (tx, rx) = futures_channel::mpsc::unbounded::<std::result::Result<Vec<u8>, worker::Error>>();
+        let rx: futures_channel::mpsc::UnboundedReceiver<std::result::Result<Vec<u8>, worker::Error>> = rx;
+
         struct PreEmbed {
             tx_id: String,
             session_id: Option<String>,
@@ -1494,10 +1495,17 @@ impl UserStore {
             text_len: i64,
             combined: String,
         }
+        struct Pending {
+            tx_id: String,
+            session_id: Option<String>,
+            ts: i64,
+            values: Vec<f32>,
+        }
 
-        // Sync pre-pass: compute oldest_ts, split skipped_empty rows from
-        // those that need embedding. Avoids paying parallel overhead for
-        // rows we'd drop anyway.
+        // Sync pre-pass: compute oldest_ts, emit skipped_empty events now
+        // (cheap), collect the rest into to_embed for the async phase.
+        let mut skipped_empty = 0i64;
+        let mut oldest_ts = before_ts;
         let mut to_embed: Vec<PreEmbed> = Vec::with_capacity(rows.len());
         for row in &rows {
             let tx_id = row
@@ -1527,12 +1535,14 @@ impl UserStore {
 
             if combined.trim().len() <= 3 {
                 skipped_empty += 1;
-                processed.push(json!({
+                let ev = json!({
+                    "type": "row",
                     "tx_id": tx_id,
                     "ts": ts,
                     "status": "skipped_empty",
                     "text_len": text_len,
-                }));
+                });
+                let _ = tx.unbounded_send(Ok(format!("{ev}\n").into_bytes()));
                 continue;
             }
             to_embed.push(PreEmbed {
@@ -1544,106 +1554,121 @@ impl UserStore {
             });
         }
 
-        // Parallel embed with concurrency cap.
-        use futures_util::StreamExt;
-        let env_ref = &self.env;
-        let embed_results: Vec<(PreEmbed, Option<Vec<f32>>, i64)> =
-            futures_util::stream::iter(to_embed.into_iter().map(|pe| async move {
-                let start = Date::now().as_millis() as i64;
-                let result = embed_text(env_ref, &pe.combined).await;
-                let embed_ms = Date::now().as_millis() as i64 - start;
-                (pe, result, embed_ms)
-            }))
-            .buffer_unordered(embed_concurrency)
-            .collect()
-            .await;
+        // Spawn the async embed + upsert phase. Has to run on the local task
+        // queue (not block the handler) so the runtime can flush the
+        // receiver stream to the client while work proceeds. tx moves in;
+        // when the spawned task ends and drops tx, rx's stream closes and
+        // the response body completes.
+        let env = self.env.clone();
+        let user_hash_for_task = user_hash.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            use futures_util::StreamExt;
 
-        let mut pending: Vec<Pending> = Vec::with_capacity(embed_results.len());
-        for (pe, result, embed_ms) in embed_results {
-            match result {
-                Some(values) => pending.push(Pending {
-                    tx_id: pe.tx_id,
-                    session_id: pe.session_id,
-                    ts: pe.ts,
-                    text_len: pe.text_len,
-                    embed_ms,
-                    values,
-                }),
-                None => {
-                    embed_errors += 1;
-                    processed.push(json!({
-                        "tx_id": pe.tx_id,
-                        "ts": pe.ts,
-                        "status": "embed_err",
-                        "text_len": pe.text_len,
-                        "embed_ms": embed_ms,
-                    }));
+            let mut pending: Vec<Pending> = Vec::with_capacity(to_embed.len());
+            let mut embed_errors = 0i64;
+
+            // Parallel embeds. As each completes (in arbitrary order thanks
+            // to buffer_unordered), emit an event to the client stream.
+            let mut stream = futures_util::stream::iter(to_embed.into_iter().map(|pe| {
+                let env = env.clone();
+                async move {
+                    let start = Date::now().as_millis() as i64;
+                    let result = embed_text(&env, &pe.combined).await;
+                    let embed_ms = Date::now().as_millis() as i64 - start;
+                    (pe, result, embed_ms)
+                }
+            }))
+            .buffer_unordered(embed_concurrency);
+
+            while let Some((pe, result, embed_ms)) = stream.next().await {
+                match result {
+                    Some(values) => {
+                        let ev = json!({
+                            "type": "row",
+                            "tx_id": pe.tx_id,
+                            "ts": pe.ts,
+                            "status": "embed_ok",
+                            "text_len": pe.text_len,
+                            "embed_ms": embed_ms,
+                        });
+                        let _ = tx.unbounded_send(Ok(format!("{ev}\n").into_bytes()));
+                        pending.push(Pending {
+                            tx_id: pe.tx_id,
+                            session_id: pe.session_id,
+                            ts: pe.ts,
+                            values,
+                        });
+                    }
+                    None => {
+                        embed_errors += 1;
+                        let ev = json!({
+                            "type": "row",
+                            "tx_id": pe.tx_id,
+                            "ts": pe.ts,
+                            "status": "embed_err",
+                            "text_len": pe.text_len,
+                            "embed_ms": embed_ms,
+                        });
+                        let _ = tx.unbounded_send(Ok(format!("{ev}\n").into_bytes()));
+                    }
                 }
             }
-        }
 
-        // Phase 2: single batched upsert. One Vectorize round-trip for up to
-        // batch_size records — the old per-row path was spending ~450ms per
-        // upsert, which dominated the batch wall-clock time.
-        let batch_upsert_start = Date::now().as_millis() as i64;
-        let batch_items: Vec<BackfillVector<'_>> = pending
-            .iter()
-            .map(|p| BackfillVector {
-                tx_id: &p.tx_id,
-                session_id: p.session_id.as_deref(),
-                ts: p.ts,
-                values: p.values.clone(),
-            })
-            .collect();
-        let batch_upsert_result = vectorize_upsert_many(&self.env, &user_hash, &batch_items).await;
-        let batch_upsert_ms = Date::now().as_millis() as i64 - batch_upsert_start;
+            // Single bulk upsert of all successfully-embedded rows.
+            let batch_upsert_start = Date::now().as_millis() as i64;
+            let batch_items: Vec<BackfillVector<'_>> = pending
+                .iter()
+                .map(|p| BackfillVector {
+                    tx_id: &p.tx_id,
+                    session_id: p.session_id.as_deref(),
+                    ts: p.ts,
+                    values: p.values.clone(),
+                })
+                .collect();
+            let batch_upsert_result =
+                vectorize_upsert_many(&env, &user_hash_for_task, &batch_items).await;
+            let batch_upsert_ms = Date::now().as_millis() as i64 - batch_upsert_start;
 
-        let (upserted, upsert_errors, upsert_err_msg) = match &batch_upsert_result {
-            Ok(()) => (pending.len() as i64, 0i64, None),
-            Err(e) => (0i64, pending.len() as i64, Some(e.clone())),
-        };
-        for p in &pending {
-            let status = if batch_upsert_result.is_ok() {
-                "upserted"
-            } else {
-                "upsert_err"
+            let (upserted, upsert_errors, upsert_err_msg) = match &batch_upsert_result {
+                Ok(()) => (pending.len() as i64, 0i64, serde_json::Value::Null),
+                Err(e) => (
+                    0i64,
+                    pending.len() as i64,
+                    serde_json::Value::String(e.clone()),
+                ),
             };
-            let mut entry = json!({
-                "tx_id": p.tx_id,
-                "ts": p.ts,
-                "status": status,
-                "text_len": p.text_len,
-                "embed_ms": p.embed_ms,
+
+            let done = scanned < batch_size;
+            let next_before_ts = if done {
+                serde_json::Value::Null
+            } else {
+                json!(oldest_ts)
+            };
+            let end_event = json!({
+                "type": "end",
+                "scanned": scanned,
+                "upserted": upserted,
+                "skipped_empty": skipped_empty,
+                "embed_errors": embed_errors,
+                "upsert_errors": upsert_errors,
+                "upsert_err": upsert_err_msg,
+                "oldest_ts": oldest_ts,
+                "next_before_ts": next_before_ts,
+                "done": done,
+                "total_rows": total_rows,
+                "batch_upsert_ms": batch_upsert_ms,
             });
-            if let (Some(msg), Some(obj)) = (upsert_err_msg.as_deref(), entry.as_object_mut()) {
-                obj.insert("err".into(), json!(msg));
-            }
-            processed.push(entry);
-        }
+            let _ = tx.unbounded_send(Ok(format!("{end_event}\n").into_bytes()));
+            // tx dropped here → rx stream closes → response body completes.
+        });
 
-        // "done" when the SELECT returned less than a full batch — no older
-        // rows remain to page over. Caller re-invokes with next_before_ts
-        // until this flips true.
-        let done = scanned < batch_size;
-        let next_before_ts = if done {
-            serde_json::Value::Null
-        } else {
-            json!(oldest_ts)
-        };
-
-        Response::from_json(&json!({
-            "scanned": scanned,
-            "upserted": upserted,
-            "skipped_empty": skipped_empty,
-            "embed_errors": embed_errors,
-            "upsert_errors": upsert_errors,
-            "oldest_ts": oldest_ts,
-            "next_before_ts": next_before_ts,
-            "done": done,
-            "rows": processed,
-            "total_rows": total_rows,
-            "batch_upsert_ms": batch_upsert_ms,
-        }))
+        let resp = Response::from_stream(rx)?;
+        Ok(resp
+            .with_headers({
+                let h = Headers::new();
+                let _ = h.set("content-type", "application/x-ndjson");
+                h
+            }))
     }
 
     // One-shot merge of a source DO's data into self. Used by

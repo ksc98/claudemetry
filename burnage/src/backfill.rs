@@ -1,11 +1,15 @@
 // `burnage vectorize-backfill` — re-embed every historical turn and upsert
 // it into the caller's Vectorize namespace. One-off for vectors that predate
 // the namespace migration; safe to re-run.
+//
+// Wire format: server responds with NDJSON (one JSON event per line). Events
+// stream during the batch so the CLI shows per-row progress as embeds finish
+// instead of waiting for the whole batch.
 
 use anyhow::{anyhow, Result};
 use crossterm::style::Stylize;
 use serde_json::Value;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
 
 pub struct BackfillOpts {
@@ -41,49 +45,73 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
             body["embed_concurrency"] = serde_json::json!(c);
         }
 
-        // Pre-flight line (no newline, flushed) so the user sees that we're
-        // blocked on the server, not hung.
+        // Batch header — printed *before* the response streams so the user
+        // sees what's starting. Row lines and the final summary land below.
         let header = if total_batches > 0 {
             format!("batch {}/{}", page, total_batches)
         } else {
             format!("batch {}", page)
         };
-        let pre = format!("  {} requesting…", header.clone().dark_grey());
-        print!("\r{pre}");
+        println!("  {} streaming…", header.dark_grey());
         let _ = std::io::stdout().flush();
 
         let req_start = Instant::now();
         let resp = ureq::post(&url).set("Authorization", &auth).send_json(body);
-        let text = match resp {
-            Ok(r) => r.into_string()?,
+        let reader = match resp {
+            Ok(r) => BufReader::new(r.into_reader()),
             Err(ureq::Error::Status(code, r)) => {
                 let raw = r.into_string().unwrap_or_default();
                 return Err(anyhow!("HTTP {code}: {raw}"));
             }
             Err(e) => return Err(anyhow!(e)),
         };
+
+        let mut batch_embed_ms_sum: i64 = 0;
+        let mut batch_scanned = 0i64;
+        let mut end_seen: Option<Value> = None;
+
+        for line_result in reader.lines() {
+            let line = line_result.map_err(|e| anyhow!("read line: {e}"))?;
+            if line.is_empty() {
+                continue;
+            }
+            let ev: Value = serde_json::from_str(&line)
+                .map_err(|e| anyhow!("parse NDJSON line {line:?}: {e}"))?;
+            match ev.get("type").and_then(|t| t.as_str()) {
+                Some("row") => {
+                    print_row(&ev);
+                    batch_scanned += 1;
+                    batch_embed_ms_sum += i64_at(&ev, "embed_ms");
+                }
+                Some("end") => {
+                    end_seen = Some(ev);
+                    break;
+                }
+                _ => {
+                    // Unknown event — print as-is for debugging rather than
+                    // silently dropping. Future server additions are then
+                    // visible without a CLI update.
+                    println!("    {} {}", "?".yellow(), line.dark_grey());
+                }
+            }
+        }
+
         let req_ms = req_start.elapsed().as_millis() as i64;
 
-        let v: Value =
-            serde_json::from_str(&text).map_err(|e| anyhow!("parse {text}: {e}"))?;
-        let scanned = i64_at(&v, "scanned");
-        let upserted = i64_at(&v, "upserted");
-        let skipped = i64_at(&v, "skipped_empty");
-        let embed_err = i64_at(&v, "embed_errors");
-        let upsert_err = i64_at(&v, "upsert_errors");
-        let batch_upsert_ms = i64_at(&v, "batch_upsert_ms");
-        let done = v.get("done").and_then(|x| x.as_bool()).unwrap_or(true);
-        let empty_rows: Vec<Value> = Vec::new();
-        let rows = v
-            .get("rows")
-            .and_then(|x| x.as_array())
-            .unwrap_or(&empty_rows);
+        let end = end_seen.ok_or_else(|| {
+            anyhow!("stream ended without `end` event after {batch_scanned} rows")
+        })?;
 
-        // Cache the total on the first response — server recomputes it every
-        // batch but it only changes if new turns land mid-backfill, which
-        // isn't a case we need to be precise for.
+        let scanned = i64_at(&end, "scanned");
+        let upserted = i64_at(&end, "upserted");
+        let skipped = i64_at(&end, "skipped_empty");
+        let embed_err = i64_at(&end, "embed_errors");
+        let upsert_err = i64_at(&end, "upsert_errors");
+        let batch_upsert_ms = i64_at(&end, "batch_upsert_ms");
+        let done = end.get("done").and_then(|x| x.as_bool()).unwrap_or(true);
+
         if total_rows == 0 {
-            total_rows = i64_at(&v, "total_rows");
+            total_rows = i64_at(&end, "total_rows");
             if total_rows > 0 && opts.batch_size > 0 {
                 total_batches = (total_rows + opts.batch_size - 1) / opts.batch_size;
             }
@@ -95,10 +123,6 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
         totals.embed_err += embed_err;
         totals.upsert_err += upsert_err;
 
-        // Clear the pre-flight line, then print the batch header (with total
-        // if known) and a progress bar tracking scanned-so-far / total.
-        print!("\r\x1b[2K");
-        let embed_sum: i64 = rows.iter().map(|r| i64_at(r, "embed_ms")).sum();
         let bar = progress_bar(totals.scanned, total_rows, 24);
         let pct = if total_rows > 0 {
             (totals.scanned as f64 / total_rows as f64) * 100.0
@@ -123,40 +147,21 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
             skipped,
             embed_err,
             upsert_err,
-            embed_sum as f64 / 1000.0,
+            batch_embed_ms_sum as f64 / 1000.0,
             batch_upsert_ms as f64 / 1000.0,
             req_ms as f64 / 1000.0,
         );
-        for r in rows {
-            let tx_id = r.get("tx_id").and_then(|x| x.as_str()).unwrap_or("");
-            let status = r.get("status").and_then(|x| x.as_str()).unwrap_or("");
-            let embed_ms = i64_at(r, "embed_ms");
-            let text_len = i64_at(r, "text_len");
-            let marker = match status {
-                "upserted" => "✓".green().to_string(),
-                "skipped_empty" => "·".dark_grey().to_string(),
-                _ => "⚠".red().to_string(),
-            };
-            let detail = match status {
-                "upserted" => format!("embed {}ms", embed_ms),
-                "embed_err" => format!("embed {}ms  [embed failed]", embed_ms)
-                    .red()
-                    .to_string(),
-                "upsert_err" => {
-                    let err = r.get("err").and_then(|x| x.as_str()).unwrap_or("?");
-                    format!("embed {}ms  [batch upsert failed: {}]", embed_ms, err)
-                        .red()
-                        .to_string()
-                }
-                "skipped_empty" => "empty".dark_grey().to_string(),
-                other => other.to_string(),
-            };
+
+        if upsert_err > 0 {
+            let msg = end
+                .get("upsert_err")
+                .and_then(|x| x.as_str())
+                .unwrap_or("?");
             println!(
-                "    {} {} {}  {}",
-                marker,
-                short_tx(tx_id).dark_grey(),
-                format!("{} B", fmt_int(text_len)).dark_grey(),
-                detail,
+                "    {} {}",
+                "⚠".red(),
+                format!("bulk upsert failed ({} rows): {}", upsert_err, msg)
+                    .red()
             );
         }
 
@@ -173,10 +178,10 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
                 break;
             }
         }
-        let next = v
+        let next = end
             .get("next_before_ts")
             .and_then(|x| x.as_i64())
-            .ok_or_else(|| anyhow!("missing next_before_ts in response: {v}"))?;
+            .ok_or_else(|| anyhow!("missing next_before_ts in end event: {end}"))?;
         before_ts = Some(next);
     }
 
@@ -193,6 +198,34 @@ pub fn run(opts: BackfillOpts) -> Result<()> {
         total_s,
     );
     Ok(())
+}
+
+fn print_row(ev: &Value) {
+    let tx_id = ev.get("tx_id").and_then(|x| x.as_str()).unwrap_or("");
+    let status = ev.get("status").and_then(|x| x.as_str()).unwrap_or("");
+    let embed_ms = i64_at(ev, "embed_ms");
+    let text_len = i64_at(ev, "text_len");
+    let marker = match status {
+        "embed_ok" => "✓".green().to_string(),
+        "skipped_empty" => "·".dark_grey().to_string(),
+        _ => "⚠".red().to_string(),
+    };
+    let detail = match status {
+        "embed_ok" => format!("embed {}ms", embed_ms),
+        "embed_err" => format!("embed {}ms  [embed failed]", embed_ms)
+            .red()
+            .to_string(),
+        "skipped_empty" => "empty".dark_grey().to_string(),
+        other => other.to_string(),
+    };
+    println!(
+        "    {} {} {}  {}",
+        marker,
+        short_tx(tx_id).dark_grey(),
+        format!("{} B", fmt_int(text_len)).dark_grey(),
+        detail,
+    );
+    let _ = std::io::stdout().flush();
 }
 
 #[derive(Default)]
