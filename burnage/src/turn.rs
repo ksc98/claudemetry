@@ -65,7 +65,6 @@ fn render_table(r: &Value) {
     let cache_creation = i64_at(r, "cache_creation");
     let stop_reason = str_at(r, "stop_reason").unwrap_or_else(|| "-".into());
     let tools_json = str_at(r, "tools_json").unwrap_or_default();
-    let in_flight = i64_at(r, "in_flight");
     let anthropic_id = str_at(r, "anthropic_message_id").unwrap_or_else(|| "-".into());
     let user_text = str_at(r, "user_text").unwrap_or_default();
     let assistant_text = str_at(r, "assistant_text").unwrap_or_default();
@@ -93,9 +92,6 @@ fn render_table(r: &Value) {
     extras.push(format!("session {session}"));
     if stop_reason != "-" {
         extras.push(format!("stop {stop_reason}"));
-    }
-    if in_flight == 1 {
-        extras.push("in_flight".to_string());
     }
     if anthropic_id != "-" {
         extras.push(format!("msg_id {anthropic_id}"));

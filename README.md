@@ -17,9 +17,11 @@ Full passthrough: method, path, query, headers, and body are forwarded to `https
   │   identify    →  GET /oauth/profile   (KV cache, 1h TTL) │
   │                  user_hash = sha256(salt ‖ email)[:8]    │
   │                                                          │
-  │   ── before upstream fetch ────────────────────────────  │
-  │   stub.fetch("/ingest/start")  placeholder row,          │
-  │                                in_flight=1, spinner UI   │
+  │   ── turn lifecycle (WebSocket) ──────────────────────── │
+  │   stub.fetch("/ingest/start")  tracks the turn in        │
+  │                                `in_flight_turns`; WS     │
+  │                                broadcasts a virtual row  │
+  │                                to connected dashboards   │
   │                                                          │
   │   forward     →  streaming response  ─────────────────► client
   │                                                          │
@@ -163,7 +165,7 @@ Each user's private SQLite contains a single table (migrations are idempotent, a
 
 | column                   | type    | source                                                              |
 |--------------------------|---------|---------------------------------------------------------------------|
-| `tx_id`                  | TEXT PK | Synthetic `inflight-<ts>-<rand>` assigned at request arrival        |
+| `tx_id`                  | TEXT PK | Synthetic `tx-<ts>-<rand>` assigned at request arrival        |
 | `ts`                     | INT     | Request arrival time (ms since epoch)                               |
 | `session_id`             | TEXT    | `x-claude-code-session-id` header                                   |
 | `method`                 | TEXT    | HTTP method                                                          |
@@ -179,19 +181,13 @@ Each user's private SQLite contains a single table (migrations are idempotent, a
 | `tools_json`             | TEXT    | JSON array of tool names invoked in the turn                         |
 | `req_body_bytes`         | INT     | Size of the forwarded request body                                  |
 | `resp_body_bytes`        | INT     | Size of the captured response body                                  |
-| `in_flight`              | INT     | 1 between `/ingest/start` and `/ingest/finalize`; 0 once done        |
 | `anthropic_message_id`   | TEXT    | Anthropic's `message.id` (set on finalize)                           |
 | `user_text`              | TEXT    | Last `user` message's text blocks + `tool_result` content (finalize) |
 | `assistant_text`         | TEXT    | Concatenated `text_delta` from the SSE stream (finalize)             |
 
-Indexed on `ts DESC`, `(session_id, ts)`, and a partial index on `ts` where `in_flight = 1` (backs the orphan sweep). An FTS5 virtual table (`transactions_fts`) mirrors `user_text` + `assistant_text` via sync triggers, and finalized turns are also embedded into a shared Vectorize index (`burnage`, 1024-dim, cosine) for semantic search — see **Search** below.
+Indexed on `ts DESC` and `(session_id, ts)`. An FTS5 virtual table (`transactions_fts`) mirrors `user_text` + `assistant_text` via sync triggers, and finalized turns are also embedded into a shared Vectorize index (`burnage`, 1024-dim, cosine) for semantic search — see **Search** below.
 
-Each request writes the row twice. A placeholder (`in_flight = 1`, all metrics zero) is
-inserted into the DO as soon as the request arrives, so the dashboard can show a spinner
-while the upstream is still streaming. When the response completes, `/ingest/finalize`
-overwrites the row with the real metrics and flips `in_flight` to 0. If the worker is
-evicted between the two writes, the next fresh DO instance sweeps any placeholder older
-than 5 min to `stop_reason = 'error'`.
+The row is written exactly once, at `/ingest/finalize`, with the full set of metrics. While a turn is streaming it lives in a separate `in_flight_turns` table (tx_id + session_id + request-side knobs); WebSocket subscribers get a virtual row broadcast for spinner UI. `in_flight_turns` is purged on finalize and on every DO init (entries older than 10 min).
 
 ### Search: `/_cm/search`
 
@@ -220,7 +216,7 @@ Response shape (success):
   "mode": "hybrid",
   "results": [
     {
-      "tx_id": "inflight-…",
+      "tx_id": "tx-…",
       "ts": 1776251781393,
       "session_id": "…",
       "model": "claude-opus-4-7",
@@ -279,7 +275,7 @@ curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/search \
 # Full record for one transaction — all columns including the untruncated
 # user_text + assistant_text. Backs `burnage turn <tx_id>`.
 curl -H "Authorization: Bearer <token>" https://your-proxy/_cm/turn \
-  -d '{"tx_id":"inflight-1776251872077-c68abdc2"}'
+  -d '{"tx_id":"tx-1776251872077-c68abdc2"}'
 
 # Generic SQL exec — backs `burnage shell`. Optional `hash` overrides the
 # target DO (used for cross-DO inspection / data migration).
@@ -336,7 +332,7 @@ you want to read the whole thing.
 ```bash
 # from a search result, copy the tx_id and dump it:
 burnage search "that auth bug" -v
-burnage turn inflight-1776251872077-c68abdc2
+burnage turn tx-1776251872077-c68abdc2
 
 # or pipe-friendly:
 burnage turn <tx_id> --format json | jq '.assistant_text'
@@ -401,7 +397,7 @@ Each transaction emits two structured JSON log lines to `wrangler tail`:
 
 ```json
 {"dir":"req","ts":...,"method":"POST","url":"...","user_hash":"0203…","session_id":"…","body_len":1530}
-{"dir":"resp","ts":...,"status":200,"elapsed_ms":777,"model":"claude-opus-4-7","input_tokens":443,"output_tokens":32,"cache_read":262754,"cache_creation":951,"stop_reason":"end_turn","tx_id":"inflight-…","body_len":2472}
+{"dir":"resp","ts":...,"status":200,"elapsed_ms":777,"model":"claude-opus-4-7","input_tokens":443,"output_tokens":32,"cache_read":262754,"cache_creation":951,"stop_reason":"end_turn","tx_id":"tx-…","body_len":2472}
 ```
 
 Best-effort operations on the finalize path (embedding + Vectorize upsert)

@@ -90,7 +90,7 @@ struct BackfillArgs {
 
 #[derive(clap::Args)]
 struct TurnArgs {
-    /// Synthetic tx_id to look up (e.g. `inflight-1776251872077-c68abdc2`).
+    /// Synthetic tx_id to look up (e.g. `tx-1776251872077-c68abdc2`).
     /// Find one via `burnage search` or `burnage recent`.
     tx_id: String,
     /// Output format. Defaults: table for tty, json otherwise.

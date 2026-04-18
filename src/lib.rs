@@ -95,12 +95,13 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
         init.with_body(Some(arr.into()));
     }
 
-    // Synthetic, stable row PK: carried through placeholder → finalize so
-    // the dashboard keys don't flap when the turn completes. Anthropic's
-    // message.id (once we see it in the SSE stream) goes into
-    // `anthropic_message_id` instead.
-    let placeholder_tx_id = format!(
-        "inflight-{}-{:08x}",
+    // Synthetic, stable row PK. Generated at request arrival rather than
+    // using Anthropic's `message.id` (which only lands partway through the
+    // SSE stream) so the dashboard key stays stable across the turn_start
+    // → turn_complete WS lifecycle. The real `message.id` goes into
+    // `anthropic_message_id` on finalize.
+    let tx_id = format!(
+        "tx-{}-{:08x}",
         start,
         js_sys::Math::random().to_bits() as u32
     );
@@ -121,7 +122,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
     // the virtual in-flight row simply disappears from the client. No
     // orphaned placeholder rows.
     if let Some(stub) = broadcast_stub {
-        let start_tx = placeholder_tx_id.clone();
+        let start_tx = tx_id.clone();
         let start_session = session_id.clone();
         let start_body = req_body_bytes.clone();
         ctx.wait_until(async move {
@@ -203,7 +204,7 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
             parse_rate_limits(&resp_headers_vec);
 
         let record = TransactionRecord {
-            tx_id: placeholder_tx_id,
+            tx_id,
             ts: start,
             session_id,
             method: method_str,
@@ -240,7 +241,6 @@ async fn fetch(mut req: Request, env: Env, ctx: Context) -> Result<Response> {
             rl_req_limit,
             rl_tok_remaining,
             rl_tok_limit,
-            in_flight: Some(0),
             anthropic_message_id,
             user_text,
             assistant_text,
@@ -681,13 +681,10 @@ impl UserStore {
             ("rl_req_limit", "INTEGER"),
             ("rl_tok_remaining", "INTEGER"),
             ("rl_tok_limit", "INTEGER"),
-            // 1 while the proxy's still waiting on the upstream SSE stream.
-            // Flipped to 0 by /ingest/finalize. Dashboard renders a spinner
-            // while this is 1 and suppresses metric columns (they're all 0).
-            ("in_flight", "INTEGER"),
-            // Anthropic's `message.id` from message_start. Row PK is now a
-            // synthetic `inflight-<ts>-<rand>` so that placeholder → finalize
-            // doesn't mutate the PK (which the dashboard keys rows by).
+            // Anthropic's `message.id` from message_start. Row PK is a
+            // synthetic `tx-<ts>-<rand>` generated at request arrival so the
+            // dashboard key stays stable across the turn_start → turn_complete
+            // WS lifecycle (Anthropic's message.id only lands mid-stream).
             ("anthropic_message_id", "TEXT"),
             // Free-text search columns. Populated on finalize: the last
             // user-role message's text (incl. tool_result content) and the
@@ -742,12 +739,13 @@ impl UserStore {
             END",
             None,
         );
-        // Partial index keeps the per-init stale-sweep UPDATE cheap: it only
-        // touches rows that are actually in flight, which is ~0 at rest.
-        let _ = sql.exec(
-            "CREATE INDEX IF NOT EXISTS idx_in_flight ON transactions(ts) WHERE in_flight = 1",
-            None,
-        );
+        // One-shot migration: drop the legacy `in_flight` column and its
+        // partial index. Post-WebSocket refactor the column is never written
+        // to 1, so it and the orphan sweep below were dead. `let _ =`
+        // because the second run of this init path (after DO restart) will
+        // see "no such column" — that's expected and fine.
+        let _ = sql.exec("DROP INDEX IF EXISTS idx_in_flight", None);
+        let _ = sql.exec("ALTER TABLE transactions DROP COLUMN in_flight", None);
 
         // In-flight turns are tracked here so a page refresh during an
         // active turn can re-render the spinner. Rows are inserted on
@@ -830,16 +828,6 @@ impl UserStore {
         // keeps the table consistent with the new filter.
         let _ = sql.exec(
             "DELETE FROM session_summaries WHERE model IS NULL",
-            None,
-        );
-        // One-time cleanup: mark any legacy in-flight placeholders as errors.
-        // With the WebSocket refactor, in-flight state is client-side only —
-        // no more placeholder rows. This sweep handles pre-refactor orphans.
-        let _ = sql.exec(
-            "UPDATE transactions
-             SET in_flight = 0,
-                 stop_reason = COALESCE(stop_reason, 'error')
-             WHERE in_flight = 1",
             None,
         );
         self.initialized.set(true);
@@ -1004,7 +992,6 @@ impl UserStore {
                 "rl_req_limit": r.rl_req_limit,
                 "rl_tok_remaining": r.rl_tok_remaining,
                 "rl_tok_limit": r.rl_tok_limit,
-                "in_flight": 0,
                 "anthropic_message_id": r.anthropic_message_id,
                 "has_text": if r.assistant_text.as_deref().unwrap_or("").is_empty() { 0 } else { 1 },
             }
@@ -1026,9 +1013,9 @@ impl UserStore {
               stop_reason, tools_json, req_body_bytes, resp_body_bytes,
               cache_creation_5m, cache_creation_1h, thinking_budget, thinking_blocks,
               max_tokens, rl_req_remaining, rl_req_limit, rl_tok_remaining, rl_tok_limit,
-              in_flight, anthropic_message_id,
+              anthropic_message_id,
               user_text, assistant_text, thinking_text, tool_calls_json)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         );
         sql.exec(
             &stmt,
@@ -1058,7 +1045,6 @@ impl UserStore {
                 r.rl_req_limit.into(),
                 r.rl_tok_remaining.into(),
                 r.rl_tok_limit.into(),
-                r.in_flight.into(),
                 r.anthropic_message_id.clone().into(),
                 r.user_text.clone().into(),
                 r.assistant_text.clone().into(),
@@ -1121,7 +1107,7 @@ impl UserStore {
                     thinking_budget, thinking_blocks, max_tokens,
                     rl_req_remaining, rl_req_limit,
                     rl_tok_remaining, rl_tok_limit,
-                    in_flight, anthropic_message_id,
+                    anthropic_message_id,
                     CASE WHEN LENGTH(COALESCE(assistant_text,'')) > 0 THEN 1 ELSE 0 END AS has_text
              FROM transactions WHERE ts >= ? ORDER BY ts DESC",
             Some(vec![since.into()]),
@@ -1217,7 +1203,7 @@ impl UserStore {
                     thinking_budget, thinking_blocks, max_tokens,
                     rl_req_remaining, rl_req_limit,
                     rl_tok_remaining, rl_tok_limit,
-                    in_flight, anthropic_message_id,
+                    anthropic_message_id,
                     CASE WHEN LENGTH(COALESCE(assistant_text,'')) > 0 THEN 1 ELSE 0 END AS has_text
              FROM transactions
              WHERE session_id = ? ORDER BY ts DESC LIMIT ?",
@@ -1929,8 +1915,6 @@ struct TransactionRecord {
     rl_tok_remaining: Option<i64>,
     #[serde(default)]
     rl_tok_limit: Option<i64>,
-    #[serde(default)]
-    in_flight: Option<i64>,
     #[serde(default)]
     anthropic_message_id: Option<String>,
     /// Text of the caller's last `user` message — new prompt + tool_result
