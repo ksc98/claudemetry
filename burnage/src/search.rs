@@ -201,6 +201,11 @@ fn render_hit(h: &Hit, verbose: bool) {
             session.dark_grey(),
         );
     }
+    // Resume hint — a copy-pasteable command that reopens the session this
+    // hit came from. Skip when the row has no session_id (older rows, etc.).
+    if let Some(sid) = h.session_id.as_deref().filter(|s| !s.is_empty()) {
+        println!("  {}", format!("claude -r {sid}").dark_grey());
+    }
 }
 
 /// For display only: convert <mark> to ANSI highlight, strip ASCII
