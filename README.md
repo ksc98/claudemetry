@@ -287,8 +287,19 @@ These are bearer-gated and never cross identities unless you ask via `hash`.
 
 ## `burnage` CLI
 
-Thin cross-platform CLI over the `/_cm/*` endpoints, installed via
-`just burnage-install` (bakes the primary entry from `$DOMAINS` in as the default `--url`).
+Thin cross-platform CLI over the `/_cm/*` endpoints. Three ways to install:
+
+```bash
+brew install ksc98/tap/burnage                              # macOS + Linux via Homebrew
+cargo install --git https://github.com/ksc98/burnage burnage  # any platform with cargo
+just burnage-install                                        # in-tree dev build (bakes $DOMAINS[0] as default --url)
+```
+
+Homebrew and `cargo install --git` builds have no baked-in URL — they
+default to `$ANTHROPIC_BASE_URL` (the same var you already set to route
+Claude Code through your proxy). The `just burnage-install` path bakes
+the primary entry from `$DOMAINS` in as the default so the CLI works
+without `--url` even when the env var isn't set.
 
 ```bash
 burnage whoami                # your stable user_hash + email
@@ -379,9 +390,10 @@ To fire `burnage session end` automatically on every Claude Code
 ```
 
 Plugin source + safety notes: [`plugins/burnage/`](./plugins/burnage/). The
-plugin doesn't install the CLI — do that first with
-`cargo install --git https://github.com/ksc98/burnage burnage` (or, if you
-cloned this repo, `just burnage-install`).
+plugin doesn't install the CLI — install it separately with
+`brew install ksc98/tap/burnage`,
+`cargo install --git https://github.com/ksc98/burnage burnage`, or, if
+you cloned this repo, `just burnage-install`.
 
 ### `burnage shell`
 

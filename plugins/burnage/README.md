@@ -14,11 +14,13 @@ show session boundaries.
 4. The `burnage` CLI on `PATH`:
 
    ```bash
-   cargo install --git https://github.com/ksc98/burnage burnage
+   brew install ksc98/tap/burnage                                # macOS + Linux
+   # or
+   cargo install --git https://github.com/ksc98/burnage burnage  # any platform with cargo
    ```
 
-   The CLI is published straight from the `burnage/` workspace member; no
-   baked-in URL, so it defers entirely to `$ANTHROPIC_BASE_URL` at runtime.
+   The CLI has no baked-in URL; it defers entirely to
+   `$ANTHROPIC_BASE_URL` at runtime.
 
 ## Install the plugin
 
@@ -73,4 +75,5 @@ proxy operator (you) sees your traffic, and you choose the URL.
 /plugin marketplace remove burnage
 ```
 
-The CLI itself stays until you `cargo uninstall burnage`.
+The CLI itself stays until you `brew uninstall burnage` (or
+`cargo uninstall burnage` if you installed via cargo).
