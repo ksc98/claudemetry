@@ -1,5 +1,15 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v burnage >/dev/null 2>&1 || { command -v cargo >/dev/null 2>&1 && nohup cargo install --git https://github.com/ksc98/burnage burnage --locked >/tmp/burnage-install.log 2>&1 </dev/null & } ; true"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [

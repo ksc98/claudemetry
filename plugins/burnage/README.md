@@ -10,15 +10,13 @@ show session boundaries.
    [top-level README](https://github.com/ksc98/burnage#readme)).
 2. `ANTHROPIC_BASE_URL` in your shell pointing at that proxy — same env var
    you already use to route Claude Code through burnage.
-3. `jq` on `PATH` (used by the hook to read `session_id` from stdin).
-4. The `burnage` CLI on `PATH`:
+3. `jq` and `cargo` on `PATH`. The first `SessionStart` after install uses
+   `cargo` to fetch the `burnage` CLI in the background; `jq` is used by
+   the `SessionEnd` hook to read `session_id` from stdin.
 
-   ```bash
-   cargo install --git https://github.com/ksc98/burnage burnage
-   ```
-
-   The CLI is published straight from the `burnage/` workspace member; no
-   baked-in URL, so it defers entirely to `$ANTHROPIC_BASE_URL` at runtime.
+The `burnage` CLI is published straight from the `burnage/` workspace
+member; no baked-in URL, so it defers entirely to `$ANTHROPIC_BASE_URL`
+at runtime.
 
 ## Install the plugin
 
@@ -29,11 +27,32 @@ Inside Claude Code:
 /plugin install burnage@burnage
 ```
 
-Then start a new Claude Code session. When it ends, the hook fires once.
+Start a new Claude Code session. If the `burnage` CLI isn't on `PATH`, the
+`SessionStart` hook kicks off `cargo install --git https://github.com/ksc98/burnage burnage`
+in the background (logs to `/tmp/burnage-install.log`). The first session
+after install may end before the CLI finishes building — subsequent
+`SessionEnd` events will record normally.
 
-## What the hook does
+To install the CLI eagerly instead:
 
-`hooks/hooks.json` registers one `SessionEnd` hook:
+```bash
+cargo install --git https://github.com/ksc98/burnage burnage
+```
+
+## What the hooks do
+
+`hooks/hooks.json` registers two hooks:
+
+**`SessionStart`** — bootstraps the CLI if missing:
+
+```
+command -v burnage >/dev/null 2>&1 || { command -v cargo >/dev/null 2>&1 && nohup cargo install --git https://github.com/ksc98/burnage burnage --locked >/tmp/burnage-install.log 2>&1 </dev/null & } ; true
+```
+
+No-op once `burnage` is on `PATH`. The install runs detached via `nohup &`
+so it never blocks session startup.
+
+**`SessionEnd`** — records the ended session:
 
 ```
 jq -r '.session_id // empty' | xargs -r -I{} burnage session end {}
@@ -57,8 +76,8 @@ The plugin never calls out to anything other than the URL in **your own**
 | Concern | Answer |
 | ------- | ------ |
 | Does the plugin bake in a server URL? | No. The CLI uses `$ANTHROPIC_BASE_URL` (the same var you already set to point at your proxy). |
-| Does installing the plugin execute code? | No. Plugins ship skills, hooks, agents, etc. as data — there is no install script. |
-| Does the hook run arbitrary code? | No. The `command` string is the entire hook, visible in [`hooks/hooks.json`](./hooks/hooks.json). |
+| Does installing the plugin execute code? | No. Installing the plugin only drops hook config on disk. On first `SessionStart`, the hook runs `cargo install --git https://github.com/ksc98/burnage burnage` if the CLI is missing — detached via `nohup &` so it can't block you, and skipped once the CLI is present. |
+| Does the hook run arbitrary code? | No. The `command` strings are the entire hooks, visible in [`hooks/hooks.json`](./hooks/hooks.json). |
 | Does the hook send my prompts/responses? | No. It sends only `{"session_id": "<id>"}`. |
 | Where does my OAuth token go? | The CLI reads `~/.claude/.credentials.json` and sends the token only as `Authorization: Bearer …` to `$ANTHROPIC_BASE_URL`. |
 | What if the CLI isn't installed? | `xargs` fails with "command not found" on session end; nothing else breaks. |
