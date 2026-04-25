@@ -2,7 +2,7 @@ import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { readUserHash } from "@/lib/cookie";
 import { getLinkedHash, readCfAccessEmail } from "@/lib/links";
-import { getSessionsSummary, getSessionEnds } from "@/lib/store";
+import { getSessionsSummary, getSessionEnds, getInFlight } from "@/lib/store";
 import { buildSessionListFromSummary } from "@/lib/sessions";
 
 export const prerender = false;
@@ -19,11 +19,19 @@ export const GET: APIRoute = async ({ request }) => {
     });
   }
   try {
-    const [buckets, sessionEnds] = await Promise.all([
+    const [buckets, sessionEnds, inFlight] = await Promise.all([
       getSessionsSummary(env.USER_STORE, userHash),
       getSessionEnds(env.USER_STORE, userHash),
+      getInFlight(env.USER_STORE, userHash),
     ]);
-    const sessions = buildSessionListFromSummary(buckets, sessionEnds);
+    const inFlightSessionIds = new Set(
+      inFlight.map((r) => r.session_id).filter((s): s is string => !!s),
+    );
+    const sessions = buildSessionListFromSummary(
+      buckets,
+      sessionEnds,
+      inFlightSessionIds,
+    );
     return new Response(JSON.stringify(sessions), {
       status: 200,
       headers: {

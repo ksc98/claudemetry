@@ -17,9 +17,11 @@ import {
   getSessionEnds,
   getSessionsSummary,
   getSessionTurns,
+  getInFlight,
   type TransactionRow,
   type SessionEnds,
   type SessionModelBucket,
+  type InFlightTurn,
 } from "@/lib/store";
 import { buildSessionListFromSummary } from "@/lib/sessions";
 import { parseWindow, windowIsBucketed, windowSince } from "@/lib/pillWindow";
@@ -48,23 +50,36 @@ let stats: Awaited<ReturnType<typeof getStats>> | null = null;
 let rows: TransactionRow[] = [];
 let sessionEnds: SessionEnds = {};
 let sessionBuckets: SessionModelBucket[] = [];
+let inFlight: InFlightTurn[] = [];
 let loadErr: string | null = null;
 if (userHash) {
   try {
-    [stats, rows, sessionBuckets, sessionEnds] = await Promise.all([
+    [stats, rows, sessionBuckets, sessionEnds, inFlight] = await Promise.all([
       getStats(ns, userHash),           // all-time (no since filter)
       getRecent(ns, userHash, sinceMs), // windowed — feeds chart + sparklines
       getSessionsSummary(ns, userHash),
       getSessionEnds(ns, userHash),
+      getInFlight(ns, userHash),
     ]);
   } catch (e) {
     loadErr = e instanceof Error ? e.message : String(e);
   }
 }
 
+// Sessions with a turn currently in flight count as active even if their
+// last completed turn fell outside ACTIVE_WINDOW_MS — eg. a slow request
+// that's been running longer than 3 minutes.
+const inFlightSessionIds = new Set(
+  inFlight.map((r) => r.session_id).filter((s): s is string => !!s),
+);
+
 // Session list is always full-history (time-independent); the pill only
 // affects time-scoped stats/graphs, not the inventory of sessions.
-const sessionList = buildSessionListFromSummary(sessionBuckets, sessionEnds);
+const sessionList = buildSessionListFromSummary(
+  sessionBuckets,
+  sessionEnds,
+  inFlightSessionIds,
+);
 
 // Eagerly fetch turns for active sessions so the recent-turns table can
 // render their turns on first paint. Collapsed sessions wait for a click.

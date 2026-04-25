@@ -427,6 +427,15 @@ export default function RecentTurnsTable({
         const touched = new Set<string>();
         for (const r of rows) {
           if (!r.session_id) continue;
+          // In-flight virtuals always seed an entry, even for sessions
+          // that weren't loaded server-side. Without this, opening the
+          // dashboard mid-turn for a session whose previous completed
+          // turn fell outside the active window loses the spinner.
+          if (r.in_flight === 1) {
+            if (!(r.session_id in next)) next[r.session_id] = [];
+            touched.add(r.session_id);
+            continue;
+          }
           if (!(r.session_id in next)) continue; // never auto-load collapsed
           touched.add(r.session_id);
         }

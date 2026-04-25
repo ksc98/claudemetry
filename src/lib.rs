@@ -905,6 +905,15 @@ impl UserStore {
     }
 
     async fn in_flight_turns(&self, req: &Request) -> Result<Response> {
+        // Opportunistic GC: drop orphans from prior turns whose /ingest never
+        // landed (worker timeout, abort, etc). Otherwise the dashboard shows
+        // ghost spinners until the next DO init runs the same cleanup.
+        let cutoff = Date::now().as_millis() as i64 - 10 * 60_000;
+        let _ = self.state.storage().sql().exec(
+            "DELETE FROM in_flight_turns WHERE ts < ?",
+            Some(vec![cutoff.into()]),
+        );
+
         let url = req.url()?;
         let session_id = url.query_pairs().find(|(k, _)| k == "session_id").map(|(_, v)| v.into_owned());
         let sql = self.state.storage().sql();

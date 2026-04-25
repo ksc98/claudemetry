@@ -23,9 +23,14 @@ const shortModel = (m: string): string =>
 
 // Build the session list directly from the DO's /sessions/summary aggregate.
 // Cost is summed per (session, model) bucket via the client-side pricing table.
+// `inFlightSessionIds` (optional) marks sessions with a request currently in
+// flight as active even if their last completed turn fell outside the
+// activity window — fixes the "no spinner on refresh" gap when a slow turn
+// runs longer than ACTIVE_WINDOW_MS.
 export function buildSessionListFromSummary(
   buckets: SessionModelBucket[],
   sessionEnds: SessionEnds,
+  inFlightSessionIds?: ReadonlySet<string>,
 ): SessionSummary[] {
   type Agg = {
     id: string;
@@ -74,6 +79,7 @@ export function buildSessionListFromSummary(
 
   const now = Date.now();
   const isActive = (s: Agg): boolean => {
+    if (inFlightSessionIds?.has(s.id)) return true;
     if (now - s.lastTs >= ACTIVE_WINDOW_MS) return false;
     const endedAt = sessionEnds[s.id];
     return endedAt == null || endedAt < s.lastTs;
