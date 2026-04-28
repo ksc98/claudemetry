@@ -110,6 +110,30 @@ function hybridLogLinearTicks(
   return { ticks, ceiling };
 }
 
+// Anchor `linearThreshold` (e.g. 100k) at this fraction of the Y-axis height
+// so the upper linear region (100k → ceiling) gets the majority of the
+// vertical space. On a pure log scale, 100k → 400k compresses to ~12% of
+// axis height, hiding growth in the range that matters most.
+const PIECEWISE_BREAKPOINT = 1 / 3;
+
+// Map a real token value into [0, 1] using a piecewise transform:
+// log scale 1 → threshold across [0, breakpoint], then linear
+// threshold → ceiling across [breakpoint, 1].
+function piecewiseTransform(
+  v: number,
+  threshold: number,
+  ceiling: number,
+): number {
+  if (v <= 1) return 0;
+  if (v <= threshold) {
+    return (Math.log10(v) / Math.log10(threshold)) * PIECEWISE_BREAKPOINT;
+  }
+  return (
+    PIECEWISE_BREAKPOINT +
+    ((v - threshold) / (ceiling - threshold)) * (1 - PIECEWISE_BREAKPOINT)
+  );
+}
+
 // Linear ticks at a fixed step up to the smallest multiple ≥ max.
 function linearTicksAtStep(max: number, step: number): number[] {
   if (!Number.isFinite(max) || max <= 0) return [0, step];
@@ -181,11 +205,23 @@ export default function TokenAreaChart({
     [instanceId],
   );
 
-  // Compute domain + ticks for the token axis. Three modes:
+  // Compute domain, ticks, and (optionally) transformed plot data for the
+  // token axis. Four modes:
+  //   piecewise: log below `linearThreshold`, linear above. Triggered when
+  //     yScale="log" + threshold + step + data exceeds threshold. Data is
+  //     transformed into [0, 1] and rendered on a linear axis so the lower
+  //     decades and the upper linear region each get a fixed share of the
+  //     axis height (threshold sits at PIECEWISE_BREAKPOINT).
   //   log: decade ticks, ceiling snapped to 1/2/5 × 10ⁿ
-  //   log + linearThreshold: decade ticks below threshold, linear step above
+  //   log + linearThreshold (data below threshold): decade ticks up to threshold
   //   linear + linearTickStep: flat 10k/100k/… ticks
-  const { yDomain, yTicks } = useMemo(() => {
+  const {
+    yDomain,
+    yTicks,
+    yScaleEffective,
+    plotData,
+    tickValueMap,
+  } = useMemo(() => {
     let m = 1;
     for (const d of data) {
       for (const k of TOKEN_KEYS) {
@@ -194,18 +230,63 @@ export default function TokenAreaChart({
       }
     }
     if (yScale === "log") {
+      if (linearThreshold && linearTickStep && m > linearThreshold) {
+        const ceiling = Math.ceil(m / linearTickStep) * linearTickStep;
+        // Only label the linear-step ticks (e.g. 100k/200k/300k/400k). The
+        // lower-decade labels (1/10/100/1k/10k) compete for the same 33% of
+        // axis height and recharts ends up dropping a haphazard subset
+        // anyway — clearer to omit them and let the 100k grid do the work.
+        const realTicks: number[] = [];
+        for (let v = linearThreshold; v <= ceiling; v += linearTickStep) {
+          realTicks.push(v);
+        }
+        const transformedTicks = realTicks.map((v) =>
+          piecewiseTransform(v, linearThreshold, ceiling),
+        );
+        const map = new Map<number, number>();
+        transformedTicks.forEach((t, i) => map.set(t, realTicks[i]));
+
+        const transformed: TokenAreaPoint[] = data.map((row) => {
+          const out: TokenAreaPoint = { ...row };
+          for (const k of TOKEN_KEYS) {
+            const v = row[k];
+            if (typeof v === "number" && v > 0) {
+              out[`${String(k)}__raw`] = v;
+              out[k] = piecewiseTransform(v, linearThreshold, ceiling);
+            }
+          }
+          return out;
+        });
+
+        return {
+          yDomain: [0, 1] as [number, number],
+          yTicks: transformedTicks,
+          yScaleEffective: "linear" as const,
+          plotData: transformed,
+          tickValueMap: map,
+        };
+      }
       if (linearThreshold && linearTickStep) {
         const { ticks, ceiling } = hybridLogLinearTicks(
           m,
           linearThreshold,
           linearTickStep,
         );
-        return { yDomain: [1, ceiling] as [number, number], yTicks: ticks };
+        return {
+          yDomain: [1, ceiling] as [number, number],
+          yTicks: ticks,
+          yScaleEffective: "log" as const,
+          plotData: data,
+          tickValueMap: undefined,
+        };
       }
       const ceiling = logCeiling(m);
       return {
         yDomain: [1, ceiling] as [number, number],
         yTicks: logTicks(ceiling),
+        yScaleEffective: "log" as const,
+        plotData: data,
+        tickValueMap: undefined,
       };
     }
     if (linearTickStep && linearTickStep > 0) {
@@ -213,9 +294,18 @@ export default function TokenAreaChart({
       return {
         yDomain: [0, ticks[ticks.length - 1]] as [number, number],
         yTicks: ticks,
+        yScaleEffective: "linear" as const,
+        plotData: data,
+        tickValueMap: undefined,
       };
     }
-    return { yDomain: undefined, yTicks: undefined };
+    return {
+      yDomain: undefined,
+      yTicks: undefined,
+      yScaleEffective: "linear" as const,
+      plotData: data,
+      tickValueMap: undefined,
+    };
   }, [data, yScale, linearTickStep, linearThreshold]);
 
   const wrapperHeight = height + (showBrush ? 36 : 0);
@@ -236,7 +326,7 @@ export default function TokenAreaChart({
         className="!aspect-auto h-full w-full"
       >
         <ComposedChart
-          data={data}
+          data={plotData}
           margin={{ top: 12, right: 48, bottom: showBrush ? 8 : 4, left: 4 }}
         >
           <defs>
@@ -266,10 +356,13 @@ export default function TokenAreaChart({
           />
           <YAxis
             yAxisId="tokens"
-            scale={yScale}
+            scale={yScaleEffective}
             domain={yDomain}
             ticks={yTicks}
-            tickFormatter={fmtTokens}
+            tickFormatter={(v) => {
+              const real = tickValueMap?.get(v as number);
+              return fmtTokens(real ?? (v as number));
+            }}
             axisLine={false}
             tickLine={false}
             tick={{ fill: "var(--color-muted-foreground)", fontSize: 11 }}
@@ -309,9 +402,22 @@ export default function TokenAreaChart({
                     : xTickFormatter(x);
                 }}
                 // Token series = fmtTokens; cost = fmtUsd + money color.
-                formatter={(value, name) => {
-                  const n = Number(value);
+                // In piecewise mode the plotted value is a [0,1] transform,
+                // so reach into the row payload for the original token count.
+                formatter={(value, name, item) => {
                   const isCost = name === "cost";
+                  let n: number;
+                  if (isCost) {
+                    n = Number(value);
+                  } else if (tickValueMap) {
+                    const payload = (
+                      item as { payload?: Record<string, unknown> } | undefined
+                    )?.payload;
+                    const raw = payload?.[`${String(name)}__raw`];
+                    n = typeof raw === "number" ? raw : Number(value);
+                  } else {
+                    n = Number(value);
+                  }
                   return (
                     <>
                       <span

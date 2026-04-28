@@ -202,7 +202,7 @@ export default function TokenChart({
       xTickFormatter={(v) => fmtTs(v, win)}
       xLabelFormatter={(v) => fmtTs(v as number, win)}
       yScale="log"
-      linearThreshold={200_000}
+      linearThreshold={100_000}
       linearTickStep={100_000}
       instanceId="tokenChart"
       showBrush={showBrush}
