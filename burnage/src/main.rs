@@ -294,11 +294,64 @@ fn config_dir() -> Result<PathBuf> {
 
 fn read_token() -> Result<String> {
     let path = config_dir()?.join(".credentials.json");
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // On macOS, Claude Code stores credentials in Keychain instead of a file
+            // (see Claude Code's Keychain entry "Claude Code-credentials"). Fall back
+            // to that before giving up, so `burnage` works on stock macOS installs.
+            if cfg!(target_os = "macos") {
+                if let Some(json) = read_token_from_keychain()? {
+                    json.into_bytes()
+                } else {
+                    return Err(anyhow!(
+                        "no credentials at {} and Keychain item 'Claude Code-credentials' not found",
+                        path.display()
+                    ));
+                }
+            } else {
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("reading {}", path.display()));
+            }
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("reading {}", path.display()));
+        }
+    };
+
     let v: serde_json::Value = serde_json::from_slice(&bytes)?;
     v["claudeAiOauth"]["accessToken"]
         .as_str()
         .map(String::from)
-        .ok_or_else(|| anyhow!("missing claudeAiOauth.accessToken in {}", path.display()))
+        .ok_or_else(|| anyhow!("missing claudeAiOauth.accessToken in credentials"))
+}
+
+#[cfg(target_os = "macos")]
+fn read_token_from_keychain() -> Result<Option<String>> {
+    use std::process::Command;
+    let out = Command::new("security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output()
+        .context("running `security find-generic-password`")?;
+    if !out.status.success() {
+        // Item not found (44) or other failure → caller decides what to do
+        return Ok(None);
+    }
+    let s = String::from_utf8(out.stdout)
+        .context("Keychain payload was not valid UTF-8")?
+        .trim_end_matches('\n')
+        .to_string();
+    if s.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(s))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
+fn read_token_from_keychain() -> Result<Option<String>> {
+    Ok(None)
 }
